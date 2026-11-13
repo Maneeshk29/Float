@@ -133,11 +133,29 @@ testing.
 
 ### 2. Aerial-image classifier (`models/image_model.pt`)
 
-ResNet-18 (ImageNet) fine-tuned on the 320 px thumbnails in `static/thumbs/`. Tested on the 100
-hand-labeled images it never saw: **97% accuracy, 47 of 50 floods caught, 0 of 50 false alarms.**
+ResNet-18 (ImageNet) fine-tuned on the 320 px thumbnails in `static/thumbs/`, using two label sources
+kept in separate files: the original labels (100 by hand, 1,104 by Qwen) and a second hand-labeling
+pass over 306 images (`labels/human_labels_second_pass.csv`). A human label always beats a Qwen label.
+The second pass replaced 256 Qwen labels and corrected 33 of them, mostly Hill Country 2025 images
+Qwen had called flooded. One image where the two human passes disagreed is left out.
 
-Caveat: in that test set every NOAA image is a flood, so it cannot fully rule out the model having learned
-"NOAA camera = flood". It is trained on aerial imagery, so the app also asks Qwen to describe phone photos.
+Tested on the 355 hand-labeled images it never saw (the test run trains only on Qwen-labeled images):
+
+| Test set | Images | Accuracy | Floods caught | False alarms |
+|---|---|---|---|---|
+| All hand-labeled | 355 | 91.5% | 140 / 148 | 22 / 207 |
+| Original 100 hand labels | 99 | 96.0% | 45 / 49 | 0 / 50 |
+| NOAA images only | 201 | 86.1% | 136 / 142 | 22 / 59 |
+| Hill Country 2025 | 54 | 68.5% | 4 / 5 | 16 / 49 |
+
+**Read these carefully:**
+- **The larger test is harder and more honest** than the old 100-image one (97%). It includes dry NOAA
+  images, so the model can no longer score well by learning "NOAA camera = flood".
+- **Hill Country is the weak spot.** In the test run the model had no correctly labeled Hill Country images
+  to learn from, and it raised false alarms on 16 of 49 dry scenes. The shipped model is trained on
+  all 1,193 labeled images, including the corrected Hill Country labels, so it should do better there,
+  but no held-out set is left to prove it.
+- It is trained on aerial imagery, so the app also asks Qwen to describe phone photos.
 
 ### 3. Qwen3-VL-8B on the GB10
 
@@ -151,6 +169,7 @@ dataset images.
 |---|---|
 | `labels/flood_labels.csv` | Label for each of the 1,204 images, who labeled it, and Qwen's answer and reason |
 | `labels/human_labels_first100.csv` | The 100 hand labels |
+| `labels/human_labels_second_pass.csv` | A second hand-labeling pass over 306 images (with Qwen's suggestion shown as a hint). Kept separate; `training/train_image_model.py` combines it with the original labels, and a human label always beats a Qwen label |
 | `data/sites.csv` | Per-image location, date, rainfall, elevation, FEMA zone and county statistics |
 | `data/essentials.json` | OpenStreetMap hospitals, grocery and fuel for Greater Houston (snapshot; locations only) |
 | `static/thumbs/` | 320 px thumbnails of all 1,204 images |

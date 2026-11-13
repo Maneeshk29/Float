@@ -139,7 +139,7 @@ def classify_image(pil_image):
     with torch.no_grad():
         p = torch.softmax(net(tf(pil_image.convert("RGB")).unsqueeze(0)), 1)[0, 1].item()
     return {"flood_probability": round(p, 3), "label": "flood" if p >= 0.5 else "not_flood",
-            "model": "Float ResNet-18 (trained on 1,194 labeled Texas aerial images)"}
+            "model": "Float ResNet-18 (trained on 1,193 labeled Texas aerial images)"}
 
 
 QWEN_PROMPT = ("You are helping a resident document flood conditions. Look at this photo. "

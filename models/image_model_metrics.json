@@ -1,17 +1,42 @@
 {
   "architecture": "ResNet-18 (ImageNet) fine-tuned",
   "epochs": 6,
+  "label_sources": {
+    "original (data/sites.csv)": {
+      "human": 100,
+      "qwen3-vl-8b-instruct": 1104
+    },
+    "second pass (labels/human_labels_second_pass.csv)": {
+      "images": 306,
+      "replaced_qwen_label": 256,
+      "qwen_label_corrected": 33,
+      "agreed_with_first_human_pass": 49,
+      "human_conflicts_dropped": 1
+    }
+  },
   "hand_labeled_test": {
-    "n": 100,
-    "accuracy": 0.97,
-    "floods_caught": "47/50",
+    "n": 355,
+    "accuracy": 0.915,
+    "floods_caught": "140/148",
+    "false_alarms": "22/207"
+  },
+  "hand_labeled_test_original_100": {
+    "n": 99,
+    "accuracy": 0.96,
+    "floods_caught": "45/49",
     "false_alarms": "0/50"
   },
   "hand_labeled_test_noaa_only": {
-    "n": 50,
-    "accuracy": 0.94,
-    "floods_caught": "47/50",
-    "false_alarms": "0/0"
+    "n": 201,
+    "accuracy": 0.861,
+    "floods_caught": "136/142",
+    "false_alarms": "22/59"
   },
-  "training_images": 1194
+  "hand_labeled_test_hill_country_2025": {
+    "n": 54,
+    "accuracy": 0.685,
+    "floods_caught": "4/5",
+    "false_alarms": "16/49"
+  },
+  "training_images": 1193
 }
