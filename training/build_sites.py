@@ -1,4 +1,4 @@
-"""Build data/sites.csv: one row per labeled image with the features Flood IQ uses.
+"""Build data/sites.csv: one row per labeled image with the features Float uses.
 
 Usage:  python training/build_sites.py path/to/flood_data/image_metadata.csv
 """

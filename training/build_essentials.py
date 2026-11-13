@@ -1,6 +1,6 @@
 """Build data/essentials.json: hospitals, shelters, fuel and grocery locations from OpenStreetMap.
 
-Locations only. OpenStreetMap does not say whether a place is open or stocked, so Flood IQ shows
+Locations only. OpenStreetMap does not say whether a place is open or stocked, so Float shows
 availability as "unknown".
 
 Usage:  python training/build_essentials.py [osm_raw.json]
@@ -24,7 +24,7 @@ nwr["social_facility"="shelter"]({BBOX});
 nwr["emergency"="assembly_point"]({BBOX});
 );out center tags;"""
 SERVERS = ["https://overpass-api.de/api/interpreter", "https://maps.mail.ru/osm/tools/overpass/api/interpreter"]
-USER_AGENT = "FloodIQ/0.1 (https://github.com/Maneeshk29/FloodIQ-)"
+USER_AGENT = "Float/0.1 (https://github.com/Maneeshk29/Float)"
 
 
 def download():

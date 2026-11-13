@@ -1,6 +1,6 @@
-"""Flood IQ web server (Python standard library HTTP server + the trained models).
+"""Float web server (Python standard library HTTP server + the trained models).
 
-Run:  python -m floodiq.server   then open http://localhost:8080
+Run:  python -m floatapp.server   then open http://localhost:8080
 """
 import base64
 import hashlib
@@ -18,8 +18,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 import pandas as pd
 from PIL import Image
 
-from . import live, models
-from .config import DATA, EVIDENCE, HOST, MODELS, PORT, STATIC, VLM_MODEL
+from . import community, live, models
+from .config import ALERT_CHECK_HOURS, DATA, EVIDENCE, HOST, MODELS, PORT, STATIC, VLM_MODEL
 
 def records(frame):
     """DataFrame -> list of dicts with NaN turned into None (valid JSON)."""
@@ -56,7 +56,7 @@ def sites_payload():
     keep = ["image_id", "lat", "lon", "label", "labeled_by", "locality", "date", "event_name",
             "image_role", "source_agency", "qwen_reason", "fema_zones", "rain_3d_mm"]
     return {"sites": records(SITES[keep]),
-            "provenance": {"source": "UTSA Texas flood imagery (USDA NAIP, NOAA NGS) labeled for Flood IQ: "
+            "provenance": {"source": "UTSA Texas flood imagery (USDA NAIP, NOAA NGS) labeled for Float: "
                                      "100 by hand, the rest by Qwen3-VL on the GB10",
                            "status_type": "historical"}}
 
@@ -91,7 +91,8 @@ def point(lat, lon):
     if rain["ok"]:
         sfha = fema.get("sfha") if fema["ok"] else None
         risk = models.risk_timeline(rain, rain.get("elevation_m"), sfha)
-        risk["provenance"] = {"source": "Flood IQ experimental model", "status_type": "experimental",
+        risk["outlook"] = models.outlook(rain, rain.get("elevation_m"), sfha)
+        risk["provenance"] = {"source": "Float experimental model", "status_type": "experimental",
                               "retrieved_at": live.now_iso()}
         now = rain["now_index"]
         rain["summary"] = {"past_1h_mm": round(rain["rain_mm"][now], 1),
@@ -242,6 +243,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, priorities())
             if path == "/api/evidence":
                 return self.send(200, {"records": list_evidence()})
+            if path == "/api/shelter/offers":
+                lat, lon = float(qs["lat"][0]), float(qs["lon"][0])
+                return self.send(200, {"offers": community.find_offers(
+                    lat, lon, int(qs.get("people", ["1"])[0]), qs.get("pets", ["0"])[0] == "1",
+                    qs.get("accessible", ["0"])[0] == "1")})
             if path.startswith("/api/site/"):
                 site = SITE_BY_ID.get(path.split("/")[3])
                 if not site:
@@ -267,6 +273,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, analyze(img, body.get("use_qwen", True)))
             if path == "/api/evidence":
                 return self.send(200, save_evidence(body))
+            actions = {"/api/alerts/subscribe": community.subscribe, "/api/alerts/unsubscribe": community.unsubscribe,
+                       "/api/alerts/inbox": community.inbox, "/api/shelter/offer": community.create_offer,
+                       "/api/shelter/close": community.close_offer, "/api/shelter/request": community.create_request,
+                       "/api/shelter/respond": community.respond, "/api/shelter/mine": community.mine}
+            if path in actions:
+                try:
+                    return self.send(200, actions[path](body))
+                except (ValueError, PermissionError) as e:
+                    return self.send(400, {"error": str(e)})
             return self.send(404, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -278,13 +293,15 @@ def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     status = models.vlm_status()
-    print(f"\n  Flood IQ is running:  http://localhost:{PORT}")
+    community.start_checker(ALERT_CHECK_HOURS * 3600)
+    print(f"\n  Float is running:  http://localhost:{PORT}")
     print(f"  GB10 vision model ({VLM_MODEL}): {'on' if status['enabled'] else 'off - ' + str(status['reason'])}")
+    print(f"  Flood alerts: every place people sign up for is re-checked every {ALERT_CHECK_HOURS:g} h")
     print("  Press Ctrl+C to stop.\n", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nFlood IQ stopped.")
+        print("\nFloat stopped.")
 
 
 if __name__ == "__main__":

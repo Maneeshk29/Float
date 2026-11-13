@@ -1,7 +1,7 @@
-"""Train the Flood IQ experimental flood-risk model on the labeled sites.
+"""Train the Float experimental flood-risk model on the labeled sites.
 
 Target: does the place show flooding (label from labels/flood_labels.csv)?
-Features: only inputs Flood IQ can also fetch live for any address, so the same model drives the
+Features: only inputs Float can also fetch live for any address, so the same model drives the
 NOW -> 24 h risk timeline: rainfall over the previous 1, 3 and 7 days, ground elevation and whether the
 point is inside a FEMA Special Flood Hazard Area.
 
@@ -78,7 +78,7 @@ def main():
 
     final = make_model().fit(data[FEATURES], data["y"])
     (ROOT / "models").mkdir(exist_ok=True)
-    joblib.dump({"model": final, "features": FEATURES, "version": "floodiq_risk_hgb_v1"},
+    joblib.dump({"model": final, "features": FEATURES, "version": "float_risk_hgb_v1"},
                 ROOT / "models" / "risk_model.joblib")
     (ROOT / "models" / "risk_model_metrics.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

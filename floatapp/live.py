@@ -66,7 +66,7 @@ def nws_alerts(lat, lon):
     alerts = []
     for f in data.get("features", []):
         p = f.get("properties", {})
-        alerts.append({"event": p.get("event"), "severity": p.get("severity"), "urgency": p.get("urgency"),
+        alerts.append({"id": p.get("id") or f.get("id"), "event": p.get("event"), "severity": p.get("severity"), "urgency": p.get("urgency"),
                        "headline": p.get("headline"), "description": (p.get("description") or "")[:1200],
                        "instruction": (p.get("instruction") or "")[:800], "sender": p.get("senderName"),
                        "effective": p.get("effective"), "expires": p.get("expires") or p.get("ends"),
@@ -76,10 +76,10 @@ def nws_alerts(lat, lon):
                                      data.get("updated"), url)}
 
 
-# --- FORECAST: hourly rainfall (past 7 days + next 2 days) and ground elevation -----------------
+# --- FORECAST: hourly rainfall (past 7 days + next 8 days) and ground elevation -----------------
 def rainfall(lat, lon):
     q = urllib.parse.urlencode({"latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}", "hourly": "precipitation",
-                                "past_days": 7, "forecast_days": 2, "timeformat": "unixtime",
+                                "past_days": 7, "forecast_days": 8, "timeformat": "unixtime",
                                 "precipitation_unit": "mm"})
     url = f"https://api.open-meteo.com/v1/forecast?{q}"
     try:

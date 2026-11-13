@@ -34,29 +34,62 @@ def level(p):
     return "LOW"
 
 
-def risk_timeline(rain, elevation_m, fema_sfha):
-    """Flood probability now and at +1/3/6/12/24 h, using observed + forecast rainfall windows."""
+def score_hours(rain, elevation_m, fema_sfha, offsets):
+    """Combined (trained model + rainfall rule) flood probability at each hour offset from now.
+
+    Rain windows end at hour now+offset, so forecast rain is included for future offsets."""
     bundle = risk_bundle()
     hourly, now = rain["rain_mm"], rain["now_index"]
     rows, details = [], []
-    for h in HORIZONS:
+    for h in offsets:
         end = min(now + h, len(hourly) - 1) + 1   # rainfall up to and including hour now+h
 
         def window(hours):
             return round(sum(hourly[max(end - hours, 0):end]), 1)
 
-        feats = {"rain_1d_mm": window(24), "rain_3d_mm": window(72), "rain_7d_mm": window(168),
-                 "elevation_m": elevation_m, "fema_sfha": None if fema_sfha is None else int(fema_sfha)}
-        rows.append(feats)
+        rows.append({"rain_1d_mm": window(24), "rain_3d_mm": window(72), "rain_7d_mm": window(168),
+                     "elevation_m": elevation_m, "fema_sfha": None if fema_sfha is None else int(fema_sfha)})
         details.append({"forecast_rain_mm": round(sum(hourly[now + 1:end]), 1) if h else 0.0,
-                        "past_24h_rain_mm": round(sum(hourly[max(now - 23, 0):now + 1]), 1)})
-        details[-1]["rain_6h_mm"] = window(6)
-    X = pd.DataFrame(rows)[bundle["features"]].astype(float)
-    probs = bundle["model"].predict_proba(X)[:, 1]
+                        "rain_6h_mm": window(6)})
+    probs = bundle["model"].predict_proba(pd.DataFrame(rows)[bundle["features"]].astype(float))[:, 1]
     out = []
-    for h, p_ml, feats, d in zip(HORIZONS, probs, rows, details):
+    for h, p_ml, feats, d in zip(offsets, probs, rows, details):
         p_rule = rule_probability(d["rain_6h_mm"], feats["rain_1d_mm"], feats["rain_3d_mm"], fema_sfha)
-        p = max(float(p_ml), p_rule)
+        out.append({"h": h, "p": max(float(p_ml), p_rule), "p_ml": float(p_ml), "p_rule": p_rule,
+                    "feats": feats, **d})
+    return out
+
+
+def outlook(rain, elevation_m, fema_sfha, tz="America/Chicago"):
+    """Daily flood-risk outlook for today and the next 7 days (peak hourly risk per local day)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    zone = ZoneInfo(tz)
+    times, hourly, now = rain["times"], rain["rain_mm"], rain["now_index"]
+    offsets = list(range(0, len(times) - now))
+    days = {}
+    for s in score_hours(rain, elevation_m, fema_sfha, offsets):
+        idx = now + s["h"]
+        day = datetime.fromtimestamp(times[idx], zone).date()
+        d = days.setdefault(day, {"p": 0.0, "rain_mm": 0.0, "peak_h": s["h"]})
+        d["rain_mm"] += hourly[idx]
+        if s["p"] > d["p"]:
+            d["p"], d["peak_h"] = s["p"], s["h"]
+    out = []
+    for i, (day, d) in enumerate(sorted(days.items())[:8]):
+        out.append({"date": day.isoformat(), "weekday": day.strftime("%a"), "label": day.strftime("%a %b %-d"),
+                    "probability": round(d["p"], 3), "level": level(d["p"]), "rain_mm": round(d["rain_mm"], 1),
+                    "confidence": "high" if i <= 1 else "medium" if i <= 4 else "low"})
+    peak = max(out, key=lambda d: d["probability"]) if out else None
+    return {"days": out, "peak": peak}
+
+
+def risk_timeline(rain, elevation_m, fema_sfha):
+    """Flood probability now and at +1/3/6/12/24 h, using observed + forecast rainfall windows."""
+    bundle = risk_bundle()
+    out = []
+    for s in score_hours(rain, elevation_m, fema_sfha, HORIZONS):
+        h, p, p_ml, p_rule, feats, d = s["h"], s["p"], s["p_ml"], s["p_rule"], s["feats"], s
         reasons = []
         if h:
             reasons.append(f"{d['forecast_rain_mm']:.0f} mm of rain forecast in the next {h} h")
@@ -66,7 +99,7 @@ def risk_timeline(rain, elevation_m, fema_sfha):
             reasons.append("inside a FEMA Special Flood Hazard Area")
         elif fema_sfha is False:
             reasons.append("outside FEMA's mapped high-risk flood zone (flooding still happens outside it)")
-        reasons.append(f"trained model {p_ml:.0%}, rainfall rule {p_rule:.0%}; Flood IQ shows the higher")
+        reasons.append(f"trained model {p_ml:.0%}, rainfall rule {p_rule:.0%}; Float shows the higher")
         out.append({"horizon_h": h, "probability": round(p, 3), "level": level(p),
                     "model_probability": round(float(p_ml), 3), "rule_probability": round(p_rule, 3),
                     "features": feats, "reasons": reasons})
@@ -106,7 +139,7 @@ def classify_image(pil_image):
     with torch.no_grad():
         p = torch.softmax(net(tf(pil_image.convert("RGB")).unsqueeze(0)), 1)[0, 1].item()
     return {"flood_probability": round(p, 3), "label": "flood" if p >= 0.5 else "not_flood",
-            "model": "Flood IQ ResNet-18 (trained on 1,194 labeled Texas aerial images)"}
+            "model": "Float ResNet-18 (trained on 1,194 labeled Texas aerial images)"}
 
 
 QWEN_PROMPT = ("You are helping a resident document flood conditions. Look at this photo. "

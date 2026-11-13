@@ -4,3 +4,4 @@ __pycache__/
 evidence/
 .DS_Store
 flood_data/
+state/

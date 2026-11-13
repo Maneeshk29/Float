@@ -1,4 +1,4 @@
-"""Train the Flood IQ aerial-image classifier (flood / not flood) on the labeled thumbnails.
+"""Train the Float aerial-image classifier (flood / not flood) on the labeled thumbnails.
 
 Fine-tunes an ImageNet ResNet-18 on static/thumbs/*.jpg using labels/flood_labels.csv.
 Test set: the 100 hand-labeled images (never seen in training). We also report accuracy on NOAA
