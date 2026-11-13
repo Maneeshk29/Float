@@ -305,12 +305,33 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(500, {"error": f"{type(e).__name__}: {e}"})
 
 
+def port_in_use(port):
+    """True if anything already accepts connections on localhost:port (IPv4 or IPv6)."""
+    import socket
+    for host in ("127.0.0.1", "::1"):
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def main():
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    for port in range(PORT, PORT + 20):          # if the port is taken, use the next free one
+        if port_in_use(port):
+            continue
+        try:
+            server = ThreadingHTTPServer((HOST, port), Handler)
+            break
+        except OSError:
+            continue
+    else:
+        raise SystemExit(f"Ports {PORT}-{PORT + 19} are all in use. Set PORT=... and try again.")
     server.daemon_threads = True
     status = models.vlm_status()
     community.start_checker(ALERT_CHECK_HOURS * 3600)
-    print(f"\n  Float is running:  http://localhost:{PORT}")
+    print(f"\n  Float is running:  http://localhost:{port}")
     print(f"  GB10 vision model ({VLM_MODEL}): {'on' if status['enabled'] else 'off - ' + str(status['reason'])}")
     print(f"  Flood alerts: every place people sign up for is re-checked every {ALERT_CHECK_HOURS:g} h")
     print("  Press Ctrl+C to stop.\n", flush=True)
