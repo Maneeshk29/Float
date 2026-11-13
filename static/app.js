@@ -164,14 +164,16 @@
   // ---------- place + data ----------
   function setPlace(lat, lon, label) {
     if (!inHouston(lat, lon)) { toast("Float covers Greater Houston. Showing Houston."); ({ lat, lon, label } = HOUSTON); }
+    const keepDest = watchId !== null && state.route?.dest ? state.route.dest : null;   // tracking: re-route from here
     state.place = { lat, lon, label };
-    state.route = null; state.nearbySel = 0; state.fitMap = true;
+    state.route = null; state.nearbySel = 0; state.fitMap = !keepDest;
     store.set("place", state.place);
     state.data = null; state.check = null; state.nearby = null;
     if (pin) pin.remove();
     pin = L.marker([lat, lon]).addTo(map);
-    map.setView([lat, lon], 12);
+    if (!keepDest) map.setView([lat, lon], 12);
     refreshPlace();
+    if (keepDest) routeTo(keepDest);
   }
   async function refreshPlace() {
     const { lat, lon } = state.place;
@@ -215,7 +217,7 @@
     $$("nav.tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab || (["manager", "about"].includes(tab) && b.dataset.tab === "me"))));
     TABS.forEach((t) => { $("#tab-" + t).hidden = t !== tab; });
     renderTab(tab);
-    if (tab === "nearby") { state.fitMap = true; fitMap(); }
+    if (tab === "nearby") { state.fitMap = true; fitMap(); if (stormMode() && !state.showClosures && !state.closuresAuto) { state.closuresAuto = true; toggleClosures(); } }
     if (tab === "alerts") markSeen();
     if (tab === "guides") loadEvidence().then(() => { if (state.tab === "guides") renderGuides(); });
     window.scrollTo(0, 0);
@@ -250,6 +252,7 @@
           <button class="link" id="h-details">${state.showDetails ? "Hide details" : "Next 24 hours"}</button></div>
         ${state.showDetails ? hoursHtml() : ""}</div>`;
     }
+    if (stormMode()) html += roadsCard();
     html += `<div class="grid">${historyTile()}${nearestTile()}${newsTile()}${planTile()}${phaseTile()}${alertsTile()}</div>`;
     el.innerHTML = html;
     bindGo(el);
@@ -257,6 +260,22 @@
     $$(".tl", el).forEach((b) => b.addEventListener("click", () => { state.horizon = +b.dataset.h; renderHome(); }));
     const ht = $("#t-history"); if (ht) ht.addEventListener("click", openHistory);
     if ($("#safety")) renderSafety($("#safety"));
+    if (stormMode()) {
+      ensureClosures();
+      $("#h-closures").addEventListener("click", showClosuresNow);
+      $("#h-route-shelter").addEventListener("click", () => routeToNearest("shelter"));
+      $("#h-route-hosp").addEventListener("click", () => routeToNearest("hospital"));
+    }
+  }
+  const stormMode = () => state.phase === "during" || state.check?.impact?.level === "heavy";
+  function roadsCard() {
+    const c = state.closures;
+    return `<div class="card" id="roads-card"><h2>🚧 Roads right now ${badge("verified")}</h2>
+      <div class="row2"><div><div style="font-size:2.2rem;font-weight:900;color:var(--official)">${c ? c.counts.closed : "…"}</div><div class="muted">closed or flooded</div></div>
+        <div><div style="font-size:2.2rem;font-weight:900;color:var(--moderate)">${c ? c.counts.partial : "…"}</div><div class="muted">lane closures and incidents</div></div></div>
+      <div class="map-tools" style="margin-top:14px"><button class="btn ghost" id="h-closures">🚧 Show road closures</button>
+        <button class="btn" id="h-route-shelter">🧭 Best route to nearest shelter</button><button class="btn ghost" id="h-route-hosp">🏥 Route to nearest hospital</button></div>
+      <p class="prov">Houston TranStar + City of Houston · routes avoid closed and flooded roads</p></div>`;
   }
   function hoursHtml() {
     const tl = state.data?.risk?.timeline;
@@ -338,10 +357,13 @@
       <div class="muted">${heavy ? "Flooding is likely here. Plan to leave early." : "Matched to your profile."}</div>
       <div class="calls"><a class="call" href="tel:911">911<small>Life in danger</small></a><a class="call blue" href="tel:211">2-1-1<small>Shelter + evacuation help</small></a>
         <a class="call blue" href="tel:18007332767">Red Cross<small>1-800-733-2767</small></a>${wantRide ? `<a class="call blue" href="tel:311">3-1-1<small>Houston ride help</small></a>` : ""}</div>
+      ${heavy ? `<div class="map-tools" style="margin-bottom:6px"><button class="btn" id="s-route">🧭 Safest route to nearest shelter</button><button class="btn ghost" id="s-closures">🚧 Road closures</button></div>` : ""}
       ${wantShelter ? `<h3>🏠 Places to stay</h3><div class="rows" id="s-shelter"><p class="empty">Finding places...</p></div>` : ""}
       ${wantRide ? `<h3>🚗 Rides out</h3><p class="small muted" style="margin:0">No car? Register with Texas STEAR by dialing 2-1-1 for evacuation transport.</p><div class="rows" id="s-ride"><p class="empty">Finding drivers...</p></div>` : ""}
       ${role === "need_help" ? `<h3>🆘 Help near you</h3><div class="rows">${["hospital", "pharmacy"].map((t) => state.nearby?.places?.[t]?.[0]).filter(Boolean).map((x) => placeRow(x)).join("")}</div>` : ""}
       </div>`;
+    const sr = $("#s-route"); if (sr) sr.addEventListener("click", () => routeToNearest("shelter"));
+    const sc = $("#s-closures"); if (sc) sc.addEventListener("click", showClosuresNow);
     if (!state.place) return;
     const q = `lat=${state.place.lat}&lon=${state.place.lon}&people=${p.people || 1}&pets=${p.pets ? 1 : 0}&accessible=${p.accessible ? 1 : 0}`;
     if (wantShelter) {
@@ -434,8 +456,42 @@
     }
     renderNearby();
   }
-  async function bestRoute() {
-    const dest = nearbyItems()[state.nearbySel];
+  async function bestRoute() { return routeTo(nearbyItems()[state.nearbySel]); }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function routeToNearest(cat) {
+    state.nearbyCat = cat; state.nearbySel = 0; state.route = null;
+    setTab("nearby");
+    for (let i = 0; i < 60 && !state.nearby; i++) await sleep(250);
+    const dest = nearbyItems()[0];
+    if (dest) routeTo(dest); else toast(`No ${PLACE_NAME[cat].toLowerCase()} found nearby. Call 2-1-1.`);
+  }
+  function showClosuresNow() { setTab("nearby"); if (!state.showClosures) toggleClosures(); }
+  async function ensureClosures() {
+    if (state.closures || state.closuresLoading) return;
+    state.closuresLoading = true;
+    try { state.closures = await api("/api/closures"); } catch { /* shown as unavailable */ }
+    state.closuresLoading = false;
+    if (state.tab === "home") renderHome();
+  }
+  // Location tracker: follow the phone's GPS; re-route if a route is open
+  let watchId = null;
+  const distKm = (a, b) => { const r = Math.PI / 180; return 6371 * Math.acos(Math.min(1, Math.sin(a.lat * r) * Math.sin(b.lat * r) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lon - a.lon) * r))); };
+  function toggleTracking() {
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; toast("Tracking off"); renderNearby(); return; }
+    if (!("geolocation" in navigator)) { toast("This browser can't share location"); return; }
+    watchId = navigator.geolocation.watchPosition((pos) => {
+      const here = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      if (!inHouston(here.lat, here.lon)) { toast("You're outside Greater Houston"); return; }
+      if (!state.place || distKm(state.place, here) > 0.3) setPlace(here.lat, here.lon, null);
+      else if (pin) pin.setLatLng([here.lat, here.lon]);
+    }, (err) => {
+      if (err.code !== 1) return;            // brief GPS dropouts (no signal, timeout): keep tracking
+      toast("Location is blocked. Allow it in your browser."); if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null; renderNearby();
+    },
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+    toast("Tracking your location"); renderNearby();
+  }
+  async function routeTo(dest) {
     if (!dest || !state.place) return;
     state.route = { loading: true, dest };
     renderNearby();
@@ -477,7 +533,8 @@
     top.innerHTML = `<div><div class="title">Nearby</div><p class="sub">Closest to ${esc(placeName())}</p></div>
       <div class="chips" style="margin:12px 0">${Object.keys(PLACE_ICON).map((t) => `<button data-cat="${t}" aria-pressed="${state.nearbyCat === t}">${PLACE_ICON[t]} ${PLACE_NAME[t]}</button>`).join("")}</div>
       <div class="map-tools"><button class="btn ${state.showClosures ? "on" : "ghost"}" id="n-closures">🚧 ${state.showClosures ? "Hide road closures" : "Show all road closures"}</button>
-        <button class="btn" id="n-route" ${dest && state.place ? "" : "disabled"}>🧭 Get me the best route${dest ? ` to #${state.nearbySel + 1}` : ""}</button></div>`;
+        <button class="btn" id="n-route" ${dest && state.place ? "" : "disabled"}>🧭 Get me the best route${dest ? ` to #${state.nearbySel + 1}` : ""}</button>
+        <button class="btn ${watchId !== null ? "on" : "ghost"}" id="n-track">📍 ${watchId !== null ? "Tracking on" : "Track me"}</button></div>`;
     shell.hidden = false;
     list.innerHTML = routeCard() + closuresCard() + `<div class="card">${!n ? `<p class="empty">Loading...</p>` : items.length
       ? `<div class="rows">${items.map((x, i) => `<button class="r${i === state.nearbySel ? " sel" : ""}" data-sel="${i}"><span class="num" style="background:${CAT_COLOR[state.nearbyCat]}">${i + 1}</span>
@@ -487,6 +544,7 @@
     $$("[data-cat]", top).forEach((b) => b.addEventListener("click", () => { state.nearbyCat = b.dataset.cat; state.nearbySel = 0; state.route = null; state.fitMap = true; renderNearby(); }));
     $("#n-closures").addEventListener("click", toggleClosures);
     $("#n-route").addEventListener("click", bestRoute);
+    $("#n-track").addEventListener("click", toggleTracking);
     const clear = $("#n-clear"); if (clear) clear.addEventListener("click", () => { state.route = null; state.fitMap = true; renderNearby(); });
     $$("[data-sel]", list).forEach((b) => b.addEventListener("click", () => { selectPlace(+b.dataset.sel); window.scrollTo({ top: 0, behavior: "smooth" }); }));
     $$("[data-fly]", list).forEach((b) => b.addEventListener("click", () => { const [a, o] = b.dataset.fly.split(","); map.setView([+a, +o], 15); window.scrollTo({ top: 0, behavior: "smooth" }); }));

@@ -39,7 +39,8 @@ try {
   await send("Emulation.setGeolocationOverride", { latitude: 29.7752, longitude: -95.6303, accuracy: 50 });
 
   // A neighbor offers a place to stay near the user (as another person, through the API)
-  const host = await post("/api/shelter/offer", { kind: "shelter", lat: 29.79, lon: -95.70, area: "Test host, Barker", spots: 4, pets: true, name: "Neighbor Host", contact: "555-0111" });
+  const HOST_AREA = `Test host ${Date.now() % 100000}`;
+  const host = await post("/api/shelter/offer", { kind: "shelter", lat: 29.781, lon: -95.637, area: HOST_AREA, spots: 4, pets: true, name: "Neighbor Host", contact: "555-0111" });
 
   // 1. Welcome asks for location
   await send("Page.navigate", { url: `${BASE}/` });
@@ -60,10 +61,10 @@ try {
   check("news tile has headlines", await evalJS(`document.querySelectorAll('.tile a.r').length > 0`), null);
 
   // 3. Auto-connect: need_shelter profile -> help panel with the host + rides (no car)
-  check("help panel shows nearby host", await waitFor(`document.querySelector('#s-shelter')?.innerText.includes('Test host, Barker')`), await text("#safety"));
+  check("help panel shows nearby host", await waitFor(`document.querySelector('#s-shelter')?.innerText.includes('${HOST_AREA}')`), await text("#safety"));
   check("ride section shown (no car)", await evalJS(`!!document.querySelector('#s-ride')`), null);
-  await evalJS(`[...document.querySelectorAll('#s-shelter [data-ask]')][0].click()`);
-  check("one-tap request sent", await waitFor(`/sent/i.test(document.querySelector('#s-shelter')?.innerText || '')`), await text("#s-shelter"));
+  await evalJS(`[...document.querySelectorAll('#s-shelter .offer')].find(o => o.innerText.includes('${HOST_AREA}')).querySelector('[data-ask]').click()`);
+  check("one-tap request sent", await waitFor(`/sent/i.test([...document.querySelectorAll('#s-shelter .offer')].find(o => o.innerText.includes('${HOST_AREA}'))?.innerText || '')`), await text("#s-shelter"));
   const mine = await post("/api/shelter/mine", { offers: [{ id: host.id, token: host.token }] });
   const req = mine.offers[0].requests[0];
   check("host got the request with profile details", req && req.name === "Test Evacuee" && req.people === 2 && req.pets, req);
@@ -112,6 +113,50 @@ try {
   check("after phase: 'Can I go back?'", await waitFor(`/can i go back\?/i.test(document.querySelector('#tab-home').innerText)`), (await text("#tab-home")).slice(0, 600) + " | phase=" + await evalJS(`document.querySelector('.phase [aria-pressed="true"]')?.innerText`));
   await evalJS(`document.querySelector('nav.tabs [data-tab="me"]').click(); document.querySelector('[data-go="manager"]').click()`);
   check("manager page from Me", await waitFor(`document.querySelector('#tab-manager').innerText.includes('Bevil Oaks')`), null);
+
+  // ===== Feature checklist =====
+  const lsPlace = () => evalJS(`JSON.parse(localStorage.getItem("float:place"))`);
+  await evalJS(`document.querySelector('[data-phase="before"]').click(); document.querySelector('nav.tabs [data-tab="home"]').click()`);
+  // Weather
+  check("WEATHER: liquid-glass card with 8 days, temps and rain chance", await waitFor(`!!document.querySelector('.glass-wx') && [...document.querySelectorAll('.glass-wx .wx')].filter(w => /°/.test(w.innerText) && /%/.test(w.innerText)).length === 8`), await text(".glass-wx"));
+  // News
+  check("NEWS: headlines link to articles", await evalJS(`[...document.querySelectorAll('.tile a.r')].filter(a => a.href.startsWith('http') && a.innerText.length > 20).length >= 1`), null);
+  // Rain prediction
+  await evalJS(`document.querySelector('#h-details').click()`);
+  check("RAIN PREDICTION: next-24h risk tiles (now..+24h)", await waitFor(`document.querySelectorAll('.glass-wx .tl').length === 6 && [...document.querySelectorAll('.glass-wx .tl')].every(t => /%/.test(t.innerText))`), await text(".glass-wx"));
+  const pt = await (await fetch(BASE + "/api/point?lat=29.7752&lon=-95.6303")).json();
+  check("RAIN PREDICTION: 8-day outlook from rain forecast", pt.risk?.outlook?.days?.length === 8 && pt.risk.outlook.days.every(d => typeof d.rain_mm === "number" && d.level), pt.risk?.outlook);
+  // Before / During / After
+  const phaseText = async (ph) => { await evalJS(`document.querySelector('[data-phase="${ph}"]').click(); document.querySelector('nav.tabs [data-tab="guides"]').click()`); return await text("#tab-guides .title"); };
+  check("BEFORE guide: Get ready", (await phaseText("before")) === "Get ready", await text("#tab-guides .title"));
+  check("DURING guide: Stay safe", (await phaseText("during")) === "Stay safe", await text("#tab-guides .title"));
+  check("AFTER guide: Recover + damage photos", (await phaseText("after")) === "Recover" && await evalJS(`!!document.querySelector('#ev-form')`), await text("#tab-guides"));
+  // During a storm: road closures + best route from Home
+  await evalJS(`document.querySelector('[data-phase="during"]').click(); document.querySelector('nav.tabs [data-tab="home"]').click()`);
+  check("STORM: Home shows 'Roads right now' with live counts", await waitFor(`/Roads right now/.test(document.querySelector('#roads-card')?.innerText || '') && (() => { const x = document.querySelector('#roads-card').innerText.split(String.fromCharCode(10)); const i = x.indexOf('closed or flooded'); return i > 0 && /^[0-9]+$/.test(x[i - 1]); })()`), await text("#roads-card"));
+  await evalJS(`document.querySelector('#h-route-shelter').click()`);
+  check("STORM: 'Best route to nearest shelter' draws a route", await waitFor(`!document.querySelector('#tab-nearby').hidden && /min/.test(document.querySelector('.route-card')?.innerText || '') && document.querySelector('[data-cat="shelter"]').getAttribute('aria-pressed') === 'true'`), await text("#nearby-list"));
+  check("STORM: Nearby shows road closures automatically", await waitFor(`/fully closed/.test(document.querySelector('#nearby-list').innerText) && document.querySelectorAll('.closure-x').length > 5`), null);
+  await evalJS(`document.querySelector('nav.tabs [data-tab="home"]').click()`);
+  await waitFor(`!!document.querySelector('#h-route-hosp')`);
+  await evalJS(`document.querySelector('#h-route-hosp').click()`);
+  check("STORM: route to nearest hospital", await waitFor(`/min/.test(document.querySelector('.route-card')?.innerText || '') && document.querySelector('[data-cat="hospital"]').getAttribute('aria-pressed') === 'true'`), await text("#nearby-list"));
+  // Location tracker: move the phone, Float follows and re-routes
+  await evalJS(`document.querySelector('#n-track').click()`);
+  check("TRACKER: tracking turns on", await waitFor(`/Tracking on/.test(document.querySelector('#n-track').innerText)`), await text("#n-track"));
+  await send("Emulation.setGeolocationOverride", { latitude: 29.7604, longitude: -95.3698, accuracy: 20 });
+  check("TRACKER: place follows the phone (downtown)", await waitFor(`(() => { const p = JSON.parse(localStorage.getItem("float:place")); return Math.abs(p.lat - 29.7604) < 0.001 && Math.abs(p.lon + 95.3698) < 0.001; })()`, 30000), await lsPlace());
+  check("TRACKER: route re-planned from the new spot", await waitFor(`/min/.test(document.querySelector('.route-card')?.innerText || '')`), await text("#nearby-list"));
+  await send("Emulation.setGeolocationOverride", { latitude: 32.7767, longitude: -96.797, accuracy: 20 });   // Dallas
+  await sleep(2500);
+  check("TRACKER: ignores positions outside Houston", Math.abs((await lsPlace()).lat - 29.7604) < 0.001, await lsPlace());
+  await evalJS(`document.querySelector('#n-track').click()`);
+  // Welcome GPS outside Houston falls back to Houston
+  await evalJS(`document.querySelector('#place-chip').click()`);
+  await waitFor(`!!document.querySelector('#w-gps')`);
+  await evalJS(`document.querySelector('#w-gps').click()`);
+  check("LOCATION: GPS outside Houston -> Houston", await waitFor(`(() => { const p = JSON.parse(localStorage.getItem("float:place")); return p.label === "Houston" && Math.abs(p.lat - 29.7604) < 0.001; })()`), await lsPlace());
+  await evalJS(`document.querySelector('#welcome').hidden = true`);
 
   check("no JavaScript errors", errors.length === 0, errors);
   ws.close(); browser.ws.close();
