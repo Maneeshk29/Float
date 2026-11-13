@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import pandas as pd
 from PIL import Image
 
-from . import community, live, models
+from . import check, community, live, models
 from .config import ALERT_CHECK_HOURS, DATA, EVIDENCE, HOST, MODELS, PORT, STATIC, VLM_MODEL
 
 def records(frame):
@@ -68,6 +68,15 @@ def nearby_essentials(lat, lon, radius_km=10, per_type=5):
         if d <= radius_km:
             by_type.setdefault(p["type"], []).append({**p, "km": round(d, 1)})
     return {t: sorted(v, key=lambda x: x["km"])[:per_type] for t, v in by_type.items()}
+
+
+def nearby(lat, lon, radius_km=30, per_type=12):
+    """Nearest hospitals, pharmacies, grocery, fuel and shelters: shown whatever the flood risk."""
+    s, w, n, e = (float(v) for v in ESSENTIALS["bbox"].split(","))
+    return {"places": nearby_essentials(lat, lon, radius_km, per_type),
+            "in_coverage": s <= lat <= n and w <= lon <= e,
+            "provenance": {"source": ESSENTIALS["source"], "status_type": "reference",
+                           "observed_at": ESSENTIALS["osm_snapshot"], "retrieved_at": ESSENTIALS["retrieved_at"]}}
 
 
 def nearby_evidence(lat, lon, radius_km=5):
@@ -247,7 +256,13 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon = float(qs["lat"][0]), float(qs["lon"][0])
                 return self.send(200, {"offers": community.find_offers(
                     lat, lon, int(qs.get("people", ["1"])[0]), qs.get("pets", ["0"])[0] == "1",
-                    qs.get("accessible", ["0"])[0] == "1")})
+                    qs.get("accessible", ["0"])[0] == "1", kind=qs.get("kind", ["shelter"])[0])})
+            if path == "/api/check":
+                lat, lon = float(qs["lat"][0]), float(qs["lon"][0])
+                return self.send(200, check.check(lat, lon, point(lat, lon)))
+            if path == "/api/nearby":
+                lat, lon = float(qs["lat"][0]), float(qs["lon"][0])
+                return self.send(200, nearby(lat, lon))
             if path.startswith("/api/site/"):
                 site = SITE_BY_ID.get(path.split("/")[3])
                 if not site:
@@ -276,7 +291,8 @@ class Handler(BaseHTTPRequestHandler):
             actions = {"/api/alerts/subscribe": community.subscribe, "/api/alerts/unsubscribe": community.unsubscribe,
                        "/api/alerts/inbox": community.inbox, "/api/shelter/offer": community.create_offer,
                        "/api/shelter/close": community.close_offer, "/api/shelter/request": community.create_request,
-                       "/api/shelter/respond": community.respond, "/api/shelter/mine": community.mine}
+                       "/api/shelter/respond": community.respond, "/api/shelter/mine": community.mine,
+                       "/api/profile/save": community.save_profile, "/api/profile/get": community.get_profile}
             if path in actions:
                 try:
                     return self.send(200, actions[path](body))

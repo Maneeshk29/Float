@@ -1,5 +1,5 @@
-/* Float front end. Plain JavaScript + Leaflet. One tab is visible at a time; the Before/During/After
-   phase changes what every tab shows. */
+/* Float front end. Plain JavaScript + Leaflet.
+   Flow: welcome (location -> why you're here) -> Home verdict for that place -> help, nearby, alerts. */
 (() => {
   "use strict";
   const $ = (s, el = document) => el.querySelector(s);
@@ -9,14 +9,21 @@
     get(k, d) { try { const v = localStorage.getItem("float:" + k); return v ? JSON.parse(v) : d; } catch { return d; } },
     set(k, v) { try { localStorage.setItem("float:" + k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
   };
-  const TABS = ["home", "outlook", "alerts", "shelter", "guides", "recovery", "map", "manager", "about"];
+  const TABS = ["home", "nearby", "help", "alerts", "guides", "me", "manager", "about"];
   const PHASES = ["before", "during", "after"];
+  const ROLES = {
+    need_shelter: ["🏠", "I need a place to stay"], need_ride: ["🚗", "I need a ride out"], need_help: ["🆘", "I need other help"],
+    offer_shelter: ["🤝", "I can host people"], offer_ride: ["🚙", "I can give rides"], informed: ["👀", "Just keeping informed"],
+  };
+  const PLACE_ICON = { hospital: "🏥", pharmacy: "💊", grocery: "🛒", fuel: "⛽", shelter: "🏫" };
+  const PLACE_NAME = { hospital: "Hospitals", pharmacy: "Pharmacies", grocery: "Grocery", fuel: "Fuel", shelter: "Shelters" };
   const state = {
-    tab: "home", phase: store.get("phase", null), point: null, data: null, horizon: 3,
-    sites: [], gauges: [], meta: null, shelterView: "find", offersFound: null,
+    tab: "home", phase: store.get("phase", null), place: store.get("place", null), data: null, check: null, nearby: null,
+    nearbyCat: "hospital", nearbyView: "list", help: { area: "stay", mode: null }, showDetails: false, horizon: 3,
+    profile: store.get("profile", null), profileKey: store.get("profileKey", null),
     subs: store.get("subs", []), keys: store.get("shelterKeys", { offers: [], requests: [] }),
     inbox: { subscriptions: [], notifications: [] }, mine: { offers: [], requests: [] },
-    seen: new Set(store.get("seenNotes", [])), evidence: [],
+    seen: new Set(store.get("seenNotes", [])), evidence: [], sites: [], gauges: [], meta: null,
   };
 
   // ---------- helpers ----------
@@ -26,14 +33,15 @@
     if (m < 1) return "just now";
     if (m < 60) return `${m} min ago`;
     const h = Math.round(m / 60);
-    return h < 48 ? `${h} h ago` : new Date(iso).toLocaleDateString();
+    return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
   }
-  const clock = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
-  const BADGE = { official: "Official", verified: "Verified live", forecast: "Forecast", experimental: "Experimental AI", reference: "Reference", historical: "Past floods" };
+  const clock = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+  const BADGE = { official: "Official", verified: "Live", forecast: "Forecast", experimental: "AI", reference: "Map data", historical: "History" };
   const badge = (t) => `<span class="badge ${esc(t)}">${esc(BADGE[t] || t)}</span>`;
-  const prov = (p, extra = "") => p ? `<div class="prov">${esc(p.source)} · ${esc(ago(p.retrieved_at))}${extra}</div>` : "";
   const lvClass = (lv) => "lv-" + String(lv).replace(" ", "");
   const pct = (p) => Math.round(p * 100) + "%";
+  const km = (v) => v < 10 ? v.toFixed(1) + " km" : Math.round(v) + " km";
+  const dirLink = (lat, lon) => `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`;
   async function api(url, body) {
     const opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
     const res = await fetch(url, opts);
@@ -43,257 +51,463 @@
   }
   let toastTimer;
   function toast(msg) {
-    const t = $("#toast");
-    t.textContent = msg; t.hidden = false;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+    const t = $("#toast"); t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
   }
-  const placeName = () => state.point ? (state.point.label || `${state.point.lat.toFixed(3)}, ${state.point.lon.toFixed(3)}`) : "No place set";
-  const placeLine = () => `<div class="place-line">Your place: <strong>${esc(placeName())}</strong> <button class="link-btn" data-go="map">Change</button></div>`;
-  function bindGo(root) {
-    $$("[data-go]", root).forEach((b) => b.addEventListener("click", (e) => { e.preventDefault(); setTab(b.dataset.go); }));
-  }
+  const placeName = () => state.place ? state.place.label || "Your location" : "Set location";
+  const profileReady = () => state.profile && state.profile.name && state.profile.contact;
+  const needsRide = () => state.profile && (state.profile.role === "need_ride" || !state.profile.has_car || state.profile.accessible);
+  function bindGo(root) { $$("[data-go]", root).forEach((b) => b.addEventListener("click", (e) => { e.preventDefault(); setTab(b.dataset.go); })); }
 
-  // ---------- map ----------
+  // ---------- welcome: location, then why you're here ----------
+  function showWelcome(step) {
+    const box = $("#welcome-box");
+    $("#welcome").hidden = false;
+    if (step === "location") {
+      box.innerHTML = `<div class="brand"><svg viewBox="0 0 32 32" width="34" height="34" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#0a66c2"/><path d="M5 13c3-3 5-3 8 0s5 3 8 0 5-3 6-1" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><path d="M5 20c3-3 5-3 8 0s5 3 8 0 5-3 6-1" fill="none" stroke="#9cc8f2" stroke-width="2.6" stroke-linecap="round"/></svg>Float</div>
+        <div><div class="title">Will a flood reach you?</div><p class="sub">Float checks your spot: past floods, this week's weather and local news.</p></div>
+        <button class="big-btn" id="w-gps">📍 Use my location</button>
+        <div class="msg err" id="w-msg"></div>
+        <div class="or">or</div>
+        <form class="addr" id="w-form"><input id="w-addr" type="search" placeholder="Type your address" autocomplete="street-address"><div class="results" id="w-results" hidden></div></form>
+        ${state.place ? `<button class="link" id="w-close">Keep ${esc(placeName())}</button>` : `<button class="link" id="w-skip">Skip for now (use Houston)</button>`}`;
+      $("#w-gps").addEventListener("click", useMyLocation);
+      $("#w-form").addEventListener("submit", (e) => { e.preventDefault(); searchAddress($("#w-addr").value, $("#w-results"), (r) => { setPlace(r.lat, r.lon, r.label); afterLocation(); }); });
+      const skip = $("#w-skip"), close = $("#w-close");
+      if (skip) skip.addEventListener("click", () => { setPlace(29.7604, -95.3698, "Houston"); afterLocation(); });
+      if (close) close.addEventListener("click", hideWelcome);
+    } else {
+      box.innerHTML = `<div><div class="title">Why are you here?</div><p class="sub">Float connects you to the right help.</p></div>
+        <div class="roles">${Object.entries(ROLES).map(([k, [e, t]]) => `<button class="role" data-role="${k}"><span class="e">${e}</span><strong>${esc(t)}</strong></button>`).join("")}</div>
+        <button class="link" id="w-later">Decide later</button>`;
+      $$("[data-role]", box).forEach((b) => b.addEventListener("click", async () => {
+        await saveProfile({ ...(state.profile || { people: 1, has_car: true }), role: b.dataset.role });
+        hideWelcome();
+        if (["need_shelter", "need_ride", "offer_shelter", "offer_ride"].includes(b.dataset.role) && !profileReady()) {
+          setTab("me"); toast("Add your name and phone so people can reach you");
+        }
+      }));
+      $("#w-later").addEventListener("click", hideWelcome);
+    }
+  }
+  function hideWelcome() { $("#welcome").hidden = true; store.set("welcomed", true); }
+  function afterLocation() { if (!state.profile && !store.get("welcomed", false)) showWelcome("role"); else hideWelcome(); }
+  function useMyLocation() {
+    const msg = $("#w-msg");
+    if (!("geolocation" in navigator)) { msg.textContent = "This browser can't share location. Type your address."; return; }
+    msg.className = "msg"; msg.textContent = "Asking your browser...";
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { msg.textContent = ""; setPlace(pos.coords.latitude, pos.coords.longitude, null); afterLocation(); },
+      () => { msg.className = "msg err"; msg.textContent = "Location is blocked. Type your address instead."; },
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 });
+  }
+  async function searchAddress(q, box, onPick) {
+    q = q.trim(); if (!q) return;
+    box.hidden = false; box.innerHTML = `<button disabled>Searching...</button>`;
+    try {
+      const { results } = await api(`/api/geocode?q=${encodeURIComponent(q)}`);
+      box.innerHTML = results.length ? results.map((r, i) => `<button type="button" data-i="${i}">${esc(r.name)}</button>`).join("") : `<button disabled>No match. Try street and city.</button>`;
+      $$("[data-i]", box).forEach((b) => b.addEventListener("click", () => {
+        const r = results[+b.dataset.i]; box.hidden = true;
+        onPick({ lat: r.lat, lon: r.lon, label: r.name.split(",").slice(0, 2).join(",") });
+      }));
+    } catch { box.innerHTML = `<button disabled>Search unavailable right now.</button>`; }
+  }
+  $("#place-chip").addEventListener("click", () => showWelcome("location"));
+
+  // ---------- map (lives in the Nearby tab) ----------
   const map = L.map("leaflet-map", { preferCanvas: true }).setView([29.78, -95.45], 10);
   const base = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
+    maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
   const fema = L.tileLayer.wms("https://hazards.fema.gov/arcgis/services/public/NFHLWMS/MapServer/WMSServer",
     { layers: "28", format: "image/png", transparent: true, opacity: 0.5, attribution: "FEMA NFHL" });
-  const layers = {
-    evidence: L.layerGroup().addTo(map), gauges: L.layerGroup().addTo(map), hospital: L.layerGroup().addTo(map),
-    hosts: L.layerGroup().addTo(map), grocery: L.layerGroup(), fuel: L.layerGroup(), shelter: L.layerGroup(), manager: L.layerGroup().addTo(map),
-  };
-  L.control.layers({ "Street map": base }, {
-    "Past floods (labeled photos)": layers.evidence, "River gauges (live)": layers.gauges, "FEMA flood zones": fema,
-    "Shelter hosts": layers.hosts, "Hospitals": layers.hospital, "Grocery": layers.grocery, "Fuel": layers.fuel,
-  }, { collapsed: true }).addTo(map);
+  const layers = { places: L.layerGroup().addTo(map), hosts: L.layerGroup().addTo(map), gauges: L.layerGroup().addTo(map), evidence: L.layerGroup(), manager: L.layerGroup().addTo(map) };
+  L.control.layers({ "Street map": base }, { "Nearby places": layers.places, "Hosts and drivers": layers.hosts, "River gauges": layers.gauges,
+    "Past floods (photos)": layers.evidence, "FEMA flood zones": fema }, { collapsed: true }).addTo(map);
   let pin = null;
-  map.on("click", (e) => { choosePoint(e.latlng.lat, e.latlng.lng, null); toast("Place set"); });
-  map.on("popupopen", (e) => {
-    const b = e.popup.getElement().querySelector("[data-site]");
-    if (b) b.addEventListener("click", () => openSite(b.dataset.site));
-  });
-  const COLORS = { flood: "#d84315", not_flood: "#2e7d32", uncertain: "#b07d00" };
-  const PLACE = { hospital: "#00838f", grocery: "#6d8a00", fuel: "#6b4fbb", shelter: "#0b6e4f" };
+  map.on("click", (e) => { setPlace(e.latlng.lat, e.latlng.lng, null); toast("Location set"); });
+  map.on("popupopen", (e) => { const b = e.popup.getElement().querySelector("[data-site]"); if (b) b.addEventListener("click", () => openSite(b.dataset.site)); });
 
   async function loadSites() {
     const { sites } = await api("/api/sites");
     state.sites = sites;
-    for (const s of sites) {
-      L.circleMarker([s.lat, s.lon], { radius: 5, color: "#fff", weight: 1, fillColor: COLORS[s.label], fillOpacity: 0.9 })
-        .bindPopup(() => `<img src="/static/thumbs/${esc(s.image_id)}.jpg" alt=""><strong>${s.label === "flood" ? "FLOODED" : s.label === "not_flood" ? "DRY" : "UNSURE"}</strong> · ${esc(s.date)}<br>${esc(s.locality)}<br><button class="btn small" data-site="${esc(s.image_id)}">Analyze</button>`)
-        .addTo(layers.evidence);
-    }
-  }
-  async function loadEssentials() {
-    const ess = await api("/api/essentials");
-    for (const p of ess.places) {
-      L.circleMarker([p.lat, p.lon], { radius: p.type === "hospital" ? 6 : 4, color: PLACE[p.type], weight: 1, fillColor: PLACE[p.type], fillOpacity: 0.7 })
-        .bindPopup(`<strong>${esc(p.name)}</strong><br>${esc(p.address || p.type)}<br><span class="muted">${p.type === "hospital" ? "Status: no live feed" : "Open / stock: unknown"}</span>`)
-        .addTo(layers[p.type]);
-    }
+    const C = { flood: "#e0531f", not_flood: "#2e7d32", uncertain: "#c27c00" };
+    sites.forEach((s) => L.circleMarker([s.lat, s.lon], { radius: 5, color: "#fff", weight: 1, fillColor: C[s.label], fillOpacity: 0.9 })
+      .bindPopup(() => `<img src="/static/thumbs/${esc(s.image_id)}.jpg" alt=""><strong>${s.label === "flood" ? "Flooded" : "Dry"}</strong> · ${esc(s.date)}<br><button class="btn small" data-site="${esc(s.image_id)}">Analyze</button>`)
+      .addTo(layers.evidence));
   }
   async function loadGauges() {
     try {
       const g = await api("/api/gauges");
-      if (!g.ok) throw new Error(g.error);
-      state.gauges = g.gauges;
-      layers.gauges.clearLayers();
-      for (const x of g.gauges) {
-        const [arrow, color] = { rising: ["▲", "#d84315"], falling: ["▼", "#2e7d32"], steady: ["■", "#5d6b78"] }[x.trend];
-        L.marker([x.lat, x.lon], { icon: L.divIcon({ className: "", html: `<div style="color:${color};font-size:15px;text-shadow:0 0 2px #fff,0 0 2px #fff">${arrow}</div>`, iconSize: [16, 16] }) })
-          .bindPopup(`<strong>${esc(x.name)}</strong><br>${x.stage_ft.toFixed(1)} ft · ${esc(x.trend)}<br><span class="muted">USGS · ${esc(ago(x.observed_at))}</span>`)
-          .addTo(layers.gauges);
-      }
-      if (state.data) renderHome();
+      if (!g.ok) return;
+      state.gauges = g.gauges; layers.gauges.clearLayers();
+      g.gauges.forEach((x) => {
+        const [a, c] = { rising: ["▲", "#e0531f"], falling: ["▼", "#2e7d32"], steady: ["■", "#5f6e7b"] }[x.trend];
+        L.marker([x.lat, x.lon], { icon: L.divIcon({ className: "", html: `<div style="color:${c};font-size:15px;text-shadow:0 0 2px #fff">${a}</div>`, iconSize: [16, 16] }) })
+          .bindPopup(`<strong>${esc(x.name)}</strong><br>${x.stage_ft.toFixed(1)} ft · ${esc(x.trend)} · ${esc(ago(x.observed_at))}`).addTo(layers.gauges);
+      });
     } catch (e) { console.warn("gauges", e); }
   }
-  function nearestGauges(lat, lon, n = 3) {
-    const r = Math.PI / 180;
+  function nearestGauge() {
+    if (!state.place || !state.gauges.length) return null;
+    const r = Math.PI / 180, { lat, lon } = state.place;
     const d = (g) => 6371 * Math.acos(Math.min(1, Math.sin(lat * r) * Math.sin(g.lat * r) + Math.cos(lat * r) * Math.cos(g.lat * r) * Math.cos((g.lon - lon) * r)));
-    return state.gauges.map((g) => ({ ...g, km: d(g) })).sort((a, b) => a.km - b.km).slice(0, n);
+    return state.gauges.map((g) => ({ ...g, km: d(g) })).sort((a, b) => a.km - b.km)[0];
   }
 
   // ---------- place + data ----------
-  async function choosePoint(lat, lon, label) {
-    state.point = { lat, lon, label };
+  function setPlace(lat, lon, label) {
+    state.place = { lat, lon, label };
+    store.set("place", state.place);
+    state.data = null; state.check = null; state.nearby = null;
     if (pin) pin.remove();
     pin = L.marker([lat, lon]).addTo(map);
-    state.offersFound = null;
+    map.setView([lat, lon], 12);
+    refreshPlace();
+  }
+  async function refreshPlace() {
+    const { lat, lon } = state.place;
+    $("#place-name").textContent = placeName();
     renderAll();
-    try {
-      const data = await api(`/api/point?lat=${lat}&lon=${lon}`);
-      data.fetched_at = new Date().toISOString();
-      data.label = label;
-      store.set("last", data);
-      setOnline(true);
-      state.data = data;
-    } catch (e) {
-      const last = store.get("last");
-      setOnline(false, last);
-      if (last) state.data = last;
-    }
-    autoPhase();
-    renderAll();
+    const pointJob = api(`/api/point?lat=${lat}&lon=${lon}`).then((d) => {
+      d.fetched_at = new Date().toISOString(); state.data = d; store.set("lastPoint", d); setOnline(true); autoPhase(); renderAll();
+    }).catch(() => { const last = store.get("lastPoint"); setOnline(false, last); if (last) { state.data = last; renderAll(); } });
+    api(`/api/nearby?lat=${lat}&lon=${lon}`).then((n) => { state.nearby = n; renderAll(); drawNearbyLayer(); }).catch(() => {});
+    api(`/api/check?lat=${lat}&lon=${lon}`).then((c) => {
+      state.check = c;
+      if (!state.place.label && c.place.ok) {
+        state.place.label = [c.place.city || c.place.county, c.place.zip].filter(Boolean).join(" ");
+        store.set("place", state.place); $("#place-name").textContent = placeName();
+      }
+      if (state.profileKey) saveProfile({ ...state.profile }, true);
+      autoPhase(); renderAll();
+    }).catch((e) => { state.check = { error: e.message }; renderAll(); });
     loadHosts();
+    await pointJob;
   }
   function setOnline(ok, last) {
-    const pill = $("#net-pill");
-    pill.className = "pill " + (ok ? "ok" : "bad");
-    pill.textContent = ok ? "Online" : "Offline";
     $("#offline-banner").hidden = ok;
-    if (!ok) $("#offline-banner").textContent = last ? `OFFLINE · Showing last update from ${clock(last.fetched_at)}. Conditions may have changed.` : "OFFLINE · No saved data yet.";
+    if (!ok) $("#offline-banner").textContent = last ? `OFFLINE · last update ${clock(last.fetched_at)}. Things may have changed.` : "OFFLINE · no saved data yet.";
   }
-  const floodAlerts = () => (state.data?.alerts?.alerts || []);
-  const riskNow = () => state.data?.risk?.timeline?.[0];
+  const alertsNow = () => state.data?.alerts?.alerts || [];
   function autoPhase() {
     if (store.get("phaseManual", false) && state.phase) return updatePhaseUI();
-    const now = riskNow();
-    const urgent = floodAlerts().some((a) => /flood|hurricane|tropical|surge/i.test(a.event || "")) || (now && now.probability >= 0.5);
-    state.phase = urgent ? "during" : "before";
+    const heavy = state.check?.impact?.level === "heavy" || (state.data?.risk?.timeline?.[0]?.probability >= 0.5);
+    state.phase = heavy ? "during" : "before";
     updatePhaseUI();
   }
 
   // ---------- phase + tabs ----------
-  function updatePhaseUI() {
-    $$(".phase button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.phase === state.phase)));
-    $("#phase-note").innerHTML = store.get("phaseManual", false)
-      ? `<button class="link-btn small" id="phase-auto">Use auto</button>` : "Auto · from current conditions";
-    const auto = $("#phase-auto");
-    if (auto) auto.addEventListener("click", () => { store.set("phaseManual", false); autoPhase(); renderAll(); });
-  }
-  function setPhase(p) {
-    state.phase = p;
-    store.set("phase", p);
-    store.set("phaseManual", true);
-    updatePhaseUI();
-    if (p === "during" && state.shelterView === "offer") state.shelterView = "find";
-    renderAll();
-  }
+  function updatePhaseUI() { $$(".phase button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.phase === state.phase))); }
+  function setPhase(p) { state.phase = p; store.set("phase", p); store.set("phaseManual", true); updatePhaseUI(); renderAll(); }
   function setTab(tab) {
     if (!TABS.includes(tab)) tab = "home";
     state.tab = tab;
-    if (location.hash !== "#" + tab) history.replaceState(null, "", "#" + tab);
-    $$("nav.tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
+    if (location.hash.split("/")[0] !== "#" + tab) history.replaceState(null, "", "#" + tab);
+    $$("nav.tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab || (["manager", "about"].includes(tab) && b.dataset.tab === "me"))));
     TABS.forEach((t) => { $("#tab-" + t).hidden = t !== tab; });
     renderTab(tab);
-    if (tab === "map") setTimeout(() => { map.invalidateSize(); if (state.point) map.setView([state.point.lat, state.point.lon], Math.max(map.getZoom(), 11)); }, 30);
     if (tab === "alerts") markSeen();
-    if (tab === "recovery") loadEvidence().then(() => { if (state.tab === "recovery") renderRecovery(); });
+    if (tab === "guides") loadEvidence().then(() => { if (state.tab === "guides") renderGuides(); });
     window.scrollTo(0, 0);
   }
   $$(".phase button").forEach((b) => b.addEventListener("click", () => setPhase(b.dataset.phase)));
   $$("nav.tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
-  function renderAll() { renderTab(state.tab); }
-  function renderTab(tab) {
-    const fn = { home: renderHome, outlook: renderOutlook, alerts: renderAlerts, shelter: renderShelter, guides: renderGuides,
-      recovery: renderRecovery, map: renderMapTab, manager: renderManager, about: renderAbout }[tab];
-    fn();
-  }
+  const renderAll = () => renderTab(state.tab);
+  function renderTab(t) { ({ home: renderHome, nearby: renderNearby, help: renderHelp, alerts: renderAlerts, guides: renderGuides, me: renderMe, manager: renderManager, about: renderAbout })[t](); }
 
   // ---------- HOME ----------
-  const HOME = {
-    before: { title: "Get ready", actions: [["alerts", "Turn on alerts", "Up to 7 days ahead", true], ["shelter", "Plan where to go", "Find or offer a place"], ["guides", "Check your kit", "2-minute checklist"]] },
-    during: { title: "Stay safe", actions: [["shelter", "Need shelter", "Hosts + official shelters", true], ["guides", "Safety guide", "Water, power, gas"], ["map", "Live map", "Gauges, hospitals"]] },
-    after: { title: "Recover", actions: [["recovery", "Document damage", "Photos for claims", true], ["shelter", "Place to stay", "Temporary housing"], ["guides", "Clean up safely", "Power, water, mold"]] },
-  };
-  function alertBanner() {
-    return floodAlerts().map((a) => `<div class="alert">${badge("official")} <strong>${esc((a.event || "").toUpperCase())}</strong>${a.expires ? ` · until ${esc(clock(a.expires))}` : ""}
-      <div class="small">${esc(a.headline || "")}</div>
-      ${a.instruction ? `<details><summary>What to do</summary><p class="small">${esc(a.instruction)}</p></details>` : ""}</div>`).join("");
-  }
-  function weekMini(look) {
-    if (!look) return "";
-    const bars = look.days.map((d) => `<div class="${lvClass(d.level)}" style="height:${Math.max(6, d.probability * 100)}%" title="${esc(d.label)}: ${esc(d.level)}"></div>`).join("");
-    const labels = look.days.map((d, i) => `<span>${i === 0 ? "Today" : esc(d.weekday)}</span>`).join("");
-    return `<div class="week-mini">${bars}</div><div class="week-mini-labels">${labels}</div>`;
-  }
   function renderHome() {
     const el = $("#tab-home");
-    const d = state.data, cfg = HOME[state.phase || "before"];
-    if (!d) { el.innerHTML = `${placeLine()}<div class="card"><p class="empty">Loading your place...</p></div>`; bindGo(el); return; }
-    const now = riskNow(), look = d.risk?.outlook;
-    const peak = look?.peak;
-    const g = nearestGauges(d.lat, d.lon, 1)[0];
-    const rain = d.rain?.ok ? d.rain.summary : null;
-    const fz = d.fema?.ok ? (d.fema.mapped ? `Zone ${d.fema.zone}` : "Not mapped") : "Unavailable";
-    let html = placeLine() + alertBanner();
-    html += `<div class="card"><div class="hero">
-        <div><div class="label">Flood risk now</div><div class="big ${now ? lvClass(now.level) : ""}">${now ? esc(now.level) : "–"}</div>
-          <div class="small muted">${now ? pct(now.probability) + " · " : ""}${badge("experimental")}</div></div>
-        <div><div class="label">Next 7 days${peak ? ` · peak <span class="${lvClass(peak.level)}">${esc(peak.level)}</span> ${esc(peak.weekday)}` : ""}</div>${weekMini(look)}</div>
-      </div></div>`;
-    html += `<div class="card"><h2>${esc(cfg.title)}</h2><div class="actions">${cfg.actions.map(([tab, t, s, primary]) =>
-      `<button class="action${primary ? " primary" : ""}" data-go="${tab}"><strong>${esc(t)}</strong><span>${esc(s)}</span></button>`).join("")}</div></div>`;
-    if (state.phase === "after") {
-      const ok = (b) => b ? `<span class="lv-LOW">✓</span>` : `<span class="lv-HIGH">✗</span>`;
-      const noAlerts = d.alerts?.ok && !floodAlerts().length;
-      const falling = g && g.trend !== "rising";
-      const lowRisk = now && now.probability < 0.2;
-      html += `<div class="card"><h2>Can I return?</h2><div class="list">
-        <div class="item"><span>${ok(noAlerts)} <strong>No flood alerts</strong></span>${badge("official")}</div>
-        <div class="item"><span>${ok(falling)} <strong>River not rising</strong>${g ? `<div class="d">${esc(g.name)}</div>` : ""}</span>${badge("verified")}</div>
-        <div class="item"><span>${ok(lowRisk)} <strong>Low flood risk</strong></span>${badge("experimental")}</div>
-        <div class="item"><span>➜ <strong>Wait for the official all-clear</strong><div class="d">Electrician before power on if water got inside.</div></span></div></div></div>`;
+    if (!state.place) { el.innerHTML = `<div class="card"><h2>Where are you?</h2><button class="btn block" id="h-loc">📍 Set my location</button></div>`; $("#h-loc").addEventListener("click", () => showWelcome("location")); return; }
+    const c = state.check, imp = c?.impact;
+    const look = state.data?.risk?.outlook;
+    const icon = { heavy: "🌊", possible: "⚠️", unlikely: "✅" }[imp?.level] || "⏳";
+    const official = alertsNow()[0];
+    let html = `<div class="hero ${imp ? imp.level : ""}"><div class="icon" aria-hidden="true">${icon}</div>
+      ${official ? `<div class="official">🚨 ${esc(official.event)}${official.expires ? ` · until ${esc(clock(official.expires))}` : ""}</div>` : ""}
+      <div class="eyebrow">Next 7 days · ${esc(placeName())}</div>
+      <div class="headline">${imp ? esc(imp.title) : c?.error ? "Couldn't finish the check" : "Checking your area..."}</div>
+      <div class="when">${imp?.when ? "Peak: " + esc(imp.when) : imp ? "Stay alert all the same." : "Weather, flood history and news"}</div>
+      ${imp ? `<div class="why">${imp.reasons.map((r) => `<span>${esc(r)}</span>`).join("")}</div>` : ""}
+      <div class="meta">${imp ? `Checked ${esc(ago(c.checked_at))} · AI forecast + official data · not an official warning` : ""}</div></div>`;
+    if (imp?.suggest_shelter || ["need_shelter", "need_ride", "need_help"].includes(state.profile?.role)) html += `<div id="safety"></div>`;
+    if (c?.weather?.ok) {
+      const lv = Object.fromEntries((look?.days || []).map((d) => [d.date, d.level]));
+      html += `<div class="card"><h2>This week ${badge("forecast")}</h2><div class="strip">${c.weather.days.map((d, i) => `
+        <div class="wx ${lvClass(lv[d.date] || "LOW")}"><div class="d">${i === 0 ? "Today" : esc(d.weekday)}</div><div class="i">${d.icon}</div>
+        <div class="t">${d.high_f}°</div><div class="r">${d.rain_chance ?? 0}% · ${d.rain_mm} mm</div><div class="dot" title="Flood risk ${esc(lv[d.date] || "LOW")}"></div></div>`).join("")}</div>
+        <div class="prov">Bar = flood risk that day (green low → red high).
+          <button class="link" id="h-details">${state.showDetails ? "Hide details" : "Next 24 hours"}</button></div>
+        ${state.showDetails ? hoursHtml() : ""}</div>`;
     }
-    html += `<div class="facts">
-      <div class="fact"><div class="k">Rain next 24 h</div><div class="v">${rain ? rain.next_24h_mm + " mm" : "–"}</div><div class="s">${rain ? rain.past_24h_mm + " mm past 24 h" : "unavailable"}</div></div>
-      <div class="fact"><div class="k">Nearest river</div><div class="v">${g ? `${esc(g.trend)}` : "–"}</div><div class="s">${g ? `${esc(g.name.split(" at ")[0].split(" nr ")[0])} · ${esc(ago(g.observed_at))}` : "no gauge loaded"}</div></div>
-      <div class="fact"><div class="k">FEMA zone</div><div class="v">${esc(fz)}</div><div class="s">${d.fema?.sfha ? "High-risk zone" : d.fema?.ok ? "Outside high-risk zone" : ""}</div></div></div>`;
-    if (state.phase === "before" && d.evidence?.count) {
-      const ev = d.evidence;
-      html += `<div class="card"><h2>Past floods here ${badge("historical")}</h2>
-        <p><strong>${ev.flooded} of ${ev.count}</strong> aerial photos within ${ev.radius_km} km flooded in past storms.</p>
-        <div class="thumbs">${ev.sites.slice(0, 8).map((s) => `<button class="${esc(s.label)}" data-site="${esc(s.image_id)}"><img src="/static/thumbs/${esc(s.image_id)}.jpg" alt="" loading="lazy"><span>${s.label === "flood" ? "FLOOD" : "DRY"} ${esc(s.date.slice(0, 4))}</span></button>`).join("")}</div></div>`;
-    }
+    html += `<div class="grid">${historyTile()}${nearestTile()}${newsTile()}${planTile()}${phaseTile()}${alertsTile()}</div>`;
     el.innerHTML = html;
     bindGo(el);
-    $$("[data-site]", el).forEach((b) => b.addEventListener("click", () => openSite(b.dataset.site)));
+    const det = $("#h-details"); if (det) det.addEventListener("click", () => { state.showDetails = !state.showDetails; renderHome(); });
+    $$(".tl", el).forEach((b) => b.addEventListener("click", () => { state.horizon = +b.dataset.h; renderHome(); }));
+    const ht = $("#t-history"); if (ht) ht.addEventListener("click", openHistory);
+    if ($("#safety")) renderSafety($("#safety"));
+  }
+  function hoursHtml() {
+    const tl = state.data?.risk?.timeline;
+    if (!tl) return "";
+    const sel = tl.find((t) => t.horizon_h === state.horizon) || tl[0];
+    return `<div class="timeline" style="margin-top:12px">${tl.map((t) => `<button class="tl ${lvClass(t.level)}" data-h="${t.horizon_h}"><div class="h">${t.horizon_h ? "+" + t.horizon_h + "h" : "Now"}</div><div class="p">${pct(t.probability)}</div></button>`).join("")}</div>
+      <p class="small muted" style="margin:10px 0 0">${esc(sel.reasons[0] || "")}</p>`;
+  }
+  function historyTile() {
+    const h = state.check?.history;
+    if (!h) return `<div class="tile"><div class="k">Flood history</div><div class="big">…</div></div>`;
+    const cl = h.claims;
+    const bars = cl?.ok && cl.by_year.length ? (() => { const yrs = cl.by_year.filter(([y]) => y >= 2000); const max = Math.max(...yrs.map(([, n]) => n), 1);
+      return `<div class="bars">${yrs.map(([y, n]) => `<div style="height:${Math.max(4, (n / max) * 100)}%" title="${y}: ${n}"></div>`).join("")}</div><div class="bars-x"><span>${yrs[0]?.[0] || ""}</span><span>${yrs.at(-1)?.[0] || ""}</span></div>`; })() : "";
+    return `<button class="tile" id="t-history"><div class="k">Flood history <span class="chip lvl-${h.level}">${esc(h.level)}</span></div>
+      <div class="big">${cl?.ok ? cl.claims.toLocaleString() : "–"}</div><div class="muted">${cl?.ok ? `flood claims in ZIP ${esc(cl.zip)}` : "claims data unavailable"}</div>
+      ${bars}<div class="go">See history →</div></button>`;
+  }
+  function nearestTile() {
+    const p = state.nearby?.places;
+    const one = (t) => p?.[t]?.[0] ? `<div class="r" style="padding:6px 0;border:0"><span class="ic" style="width:34px;height:34px;font-size:1.2rem">${PLACE_ICON[t]}</span><div class="m"><div class="n clamp" style="font-size:0.95rem">${esc(p[t][0].name)}</div></div><span class="km" style="font-size:0.9rem">${km(p[t][0].km)}</span></div>` : "";
+    return `<button class="tile" data-go="nearby"><div class="k">Closest to you</div>${p ? one("hospital") + one("pharmacy") + one("grocery") + one("fuel") || `<p class="empty">Outside the area we cover.</p>` : `<p class="empty">Loading...</p>`}<div class="go">All nearby →</div></button>`;
+  }
+  function newsTile() {
+    const n = state.check?.news;
+    const items = n?.ok ? n.items.slice(0, 3) : [];
+    return `<div class="tile"><div class="k">Local flood news</div>${items.length ? `<div class="rows">${items.map((i) => `<a class="r" style="padding:8px 0" href="${esc(i.link)}" target="_blank" rel="noopener"><div class="m"><div class="n clamp" style="font-size:0.95rem">${esc(i.title)}</div><div class="s">${esc(i.source)} · ${esc(ago(i.published))}</div></div></a>`).join("")}</div>`
+      : `<p class="empty">${n ? "No flood news in the last 30 days." : "Loading..."}</p>`}</div>`;
+  }
+  function planTile() {
+    const p = state.profile;
+    if (!p) return `<button class="tile" data-go="me"><div class="k">Your plan</div><div class="big" style="font-size:1.6rem">Tell us what you need</div><div class="go">Set up profile →</div></button>`;
+    const [e, t] = ROLES[p.role];
+    const pending = state.mine.offers.reduce((s, o) => s + o.requests.filter((r) => r.status === "pending").length, 0);
+    const accepted = state.mine.requests.filter((r) => r.status === "accepted").length;
+    const line = pending ? `${pending} request${pending > 1 ? "s" : ""} waiting for you` : accepted ? `${accepted} match${accepted > 1 ? "es" : ""} confirmed` : { need_shelter: "Find a place to stay", need_ride: "Find a ride", offer_shelter: "Post your space", offer_ride: "Offer seats", need_help: "Get help", informed: "You're all set" }[p.role];
+    return `<button class="tile" data-go="${p.role === "informed" ? "me" : "help"}"><div class="k">Your plan</div><div class="big" style="font-size:1.6rem">${e} ${esc(t)}</div><div class="muted">${esc(line)}</div><div class="go">${p.role === "informed" ? "Profile" : "Open Help"} →</div></button>`;
+  }
+  function phaseTile() {
+    const p = state.phase || "before";
+    if (p === "after") {
+      const g = nearestGauge(), now = state.data?.risk?.timeline?.[0];
+      const ok = (b) => b ? "✅" : "❌";
+      return `<div class="tile"><div class="k">Can I go back?</div><div style="font-size:1.05rem;font-weight:800;line-height:1.9">
+        ${ok(!alertsNow().length)} No official alerts<br>${ok(g && g.trend !== "rising")} River not rising<br>${ok(now && now.probability < 0.2)} Low flood risk</div>
+        <div class="muted small">Wait for the official all-clear.</div><button class="link" style="text-align:left;padding:6px 0" data-go="guides">Document damage →</button></div>`;
+    }
+    const [t, s] = p === "during" ? ["Stay safe", "Water, power, gas"] : ["Get ready", "Kit, plan, home"];
+    return `<button class="tile" data-go="guides"><div class="k">Guide</div><div class="big" style="font-size:1.6rem">📘 ${t}</div><div class="muted">${s}</div><div class="go">Open guide →</div></button>`;
+  }
+  function alertsTile() {
+    const on = state.inbox.subscriptions.length > 0, unread = state.inbox.notifications.filter((n) => !state.seen.has(n.id)).length;
+    return `<button class="tile" data-go="alerts"><div class="k">Alerts</div><div class="big" style="font-size:1.6rem">🔔 ${on ? "On" : "Off"}</div><div class="muted">${unread ? `${unread} new` : on ? "We'll warn you up to 7 days ahead" : "Get warned up to 7 days ahead"}</div><div class="go">${on ? "Inbox" : "Turn on"} →</div></button>`;
+  }
+  function openHistory() {
+    const h = state.check?.history;
+    if (!h) return;
+    const cl = h.claims, ds = h.disasters, ev = state.data?.evidence;
+    $("#dlg-title").textContent = "Flood history";
+    $("#dlg-body").innerHTML = `<p style="font-size:1.1rem"><strong class="lvl-${h.level}">${esc(h.level.toUpperCase())}</strong> flood history here.</p>
+      <div class="rows">${cl?.ok ? `<div class="r"><span class="ic">📄</span><div class="m"><div class="n">${cl.claims.toLocaleString()} insurance claims</div><div class="s">ZIP ${esc(cl.zip)} · $${Math.round(cl.paid_usd / 1e6).toLocaleString()}M paid · worst: ${cl.worst_years.slice(0, 3).map((w) => `${w.year} (${w.claims})`).join(", ")}</div></div></div>` : ""}
+      ${ds?.ok ? `<div class="r"><span class="ic">🏛️</span><div class="m"><div class="n">${ds.count_since_2000} federal disasters since 2000</div><div class="s">${ds.recent.slice(0, 3).map((d) => `${d.year} ${esc(d.title)}`).join(" · ")}</div></div></div>` : ""}
+      ${state.data?.fema?.ok ? `<div class="r"><span class="ic">🗺️</span><div class="m"><div class="n">FEMA zone ${esc(state.data.fema.zone || "not mapped")}</div><div class="s">${state.data.fema.sfha ? "High-risk flood zone" : "Outside the high-risk zone"}</div></div></div>` : ""}
+      ${ev?.count ? `<div class="r"><span class="ic">🛰️</span><div class="m"><div class="n">${ev.flooded} of ${ev.count} nearby aerial photos flooded</div><div class="s">Hurricane Harvey imagery, within ${ev.radius_km} km</div></div></div>` : ""}</div>
+      ${ev?.count ? `<div class="thumbs" style="margin-top:12px">${ev.sites.slice(0, 8).map((s) => `<button class="${esc(s.label)}" data-site="${esc(s.image_id)}"><img src="/static/thumbs/${esc(s.image_id)}.jpg" alt=""><span>${s.label === "flood" ? "FLOOD" : "DRY"} ${esc(s.date.slice(0, 4))}</span></button>`).join("")}</div>` : ""}
+      <p class="prov">OpenFEMA NFIP claims and disaster declarations · FEMA flood map · UTSA flood imagery</p>`;
+    $$("[data-site]", $("#dlg-body")).forEach((b) => b.addEventListener("click", () => openSite(b.dataset.site)));
+    if (!$("#site-dialog").open) $("#site-dialog").showModal();
   }
 
-  // ---------- OUTLOOK ----------
-  function renderOutlook() {
-    const el = $("#tab-outlook");
-    const d = state.data;
-    if (!d) { el.innerHTML = placeLine() + `<div class="card"><p class="empty">Loading...</p></div>`; bindGo(el); return; }
-    if (!d.risk) { el.innerHTML = placeLine() + `<div class="card"><p class="empty">Rain forecast unavailable, so no outlook right now.</p></div>`; bindGo(el); return; }
-    const look = d.risk.outlook;
-    const week = `<div class="card"><h2>Next 7 days ${badge("experimental")}</h2><div class="days">${look.days.map((x, i) => `
-      <div class="day ${lvClass(x.level)}"><div class="name">${i === 0 ? "Today" : esc(x.weekday)}<small>${esc(x.label.slice(4))}</small></div>
-        <div><span class="chip">${esc(x.level)}</span></div>
-        <div class="meter"><span style="width:${Math.max(3, x.probability * 100)}%"></span></div>
-        <div class="mm">${x.rain_mm.toFixed(0)} mm</div></div>`).join("")}</div>
-      <div class="prov">Peak risk per day · rain forecast · confidence drops after day 2</div></div>`;
-    const tl = d.risk.timeline;
-    const sel = tl.find((t) => t.horizon_h === state.horizon) || tl[0];
-    const hours = `<div class="card"><h2>Next 24 hours ${badge("experimental")}</h2>
-      <div class="timeline">${tl.map((t) => `<button class="tl ${lvClass(t.level)}" data-h="${t.horizon_h}" aria-pressed="${t.horizon_h === state.horizon}">
-        <div class="h">${t.horizon_h ? "+" + t.horizon_h + " h" : "NOW"}</div><div class="p">${pct(t.probability)}</div><div class="lv">${esc(t.level)}</div></button>`).join("")}</div>
-      <h3>${sel.horizon_h ? "In " + sel.horizon_h + " h" : "Now"}: <span class="${lvClass(sel.level)}">${esc(sel.level)}</span></h3>
-      <ul class="tight small">${sel.reasons.slice(0, 3).map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>`;
-    const rain = d.rain?.ok ? `<div class="card"><h2>Rain ${badge("forecast")}</h2>${rainChart(d.rain.chart)}
-      ${prov(d.rain.provenance)}</div>` : "";
-    const why = `<div class="card"><details class="why"><summary>How is this calculated?</summary>
-      <ul class="tight small"><li><strong>Trained model:</strong> learned from 1,204 labeled flood photos (rain, elevation, FEMA zone).</li>
-      <li><strong>Rain rule:</strong> heavy rain always raises the risk.</li><li>Float shows the higher of the two.</li>
-      <li><strong>Not an official warning.</strong> Follow NWS and local officials.</li></ul>
-      <button class="link-btn small" data-go="about">Model details</button></details></div>`;
-    const order = state.phase === "before" ? [week, hours, rain, why] : [hours, week, rain, why];
-    el.innerHTML = `<div><div class="page-title">Outlook</div>${placeLine()}</div>` + order.join("");
-    bindGo(el);
-    $$(".tl", el).forEach((b) => b.addEventListener("click", () => { state.horizon = +b.dataset.h; renderOutlook(); }));
+  // ---------- GET TO SAFETY (auto-connect) ----------
+  async function renderSafety(box) {
+    const heavy = state.check?.impact?.level === "heavy";
+    const role = state.profile?.role;
+    const wantShelter = heavy || role === "need_shelter";
+    const wantRide = role === "need_ride" || ((heavy || role === "need_shelter") && needsRide());
+    const p = state.profile || { people: 1 };
+    box.innerHTML = `<div class="safety"><h2>${heavy ? "🚨 Get to safety" : "Your help options"}</h2>
+      <div class="muted">${heavy ? "Flooding is likely here. Plan to leave early." : "Matched to your profile."}</div>
+      <div class="calls"><a class="call" href="tel:911">911<small>Life in danger</small></a><a class="call blue" href="tel:211">2-1-1<small>Shelter + evacuation help</small></a>
+        <a class="call blue" href="tel:18007332767">Red Cross<small>1-800-733-2767</small></a>${wantRide ? `<a class="call blue" href="tel:311">3-1-1<small>Houston ride help</small></a>` : ""}</div>
+      ${wantShelter ? `<h3>🏠 Places to stay</h3><div class="rows" id="s-shelter"><p class="empty">Finding places...</p></div>` : ""}
+      ${wantRide ? `<h3>🚗 Rides out</h3><p class="small muted" style="margin:0">No car? Register with Texas STEAR by dialing 2-1-1 for evacuation transport.</p><div class="rows" id="s-ride"><p class="empty">Finding drivers...</p></div>` : ""}
+      ${role === "need_help" ? `<h3>🆘 Help near you</h3><div class="rows">${["hospital", "pharmacy"].map((t) => state.nearby?.places?.[t]?.[0]).filter(Boolean).map((x) => placeRow(x)).join("")}</div>` : ""}
+      </div>`;
+    if (!state.place) return;
+    const q = `lat=${state.place.lat}&lon=${state.place.lon}&people=${p.people || 1}&pets=${p.pets ? 1 : 0}&accessible=${p.accessible ? 1 : 0}`;
+    if (wantShelter) {
+      const official = (state.nearby?.places?.shelter || []).slice(0, 2);
+      const { offers } = await api(`/api/shelter/offers?${q}&kind=shelter`).catch(() => ({ offers: [] }));
+      const el = $("#s-shelter");
+      if (el) { el.innerHTML = offers.slice(0, 3).map((o) => offerRow(o, "shelter")).join("") + official.map((x) => placeRow(x)).join("")
+        + `<a class="r" href="https://www.redcross.org/get-help/disaster-relief-and-recovery-services/find-an-open-shelter.html" target="_blank" rel="noopener"><span class="ic">🏫</span><div class="m"><div class="n">Open public shelters</div><div class="s">Red Cross live list</div></div><span class="km">→</span></a>`;
+        bindAsk(el); }
+    }
+    if (wantRide) {
+      const { offers } = await api(`/api/shelter/offers?${q}&kind=ride`).catch(() => ({ offers: [] }));
+      const el = $("#s-ride");
+      if (el) { el.innerHTML = offers.length ? offers.slice(0, 3).map((o) => offerRow(o, "ride")).join("") : `<p class="empty">No volunteer drivers nearby yet. Call 2-1-1.</p>`; bindAsk(el); }
+    }
   }
-  function rainChart(chart) {
-    if (!chart || !chart.length) return "";
-    const now = Date.now() / 1000, max = Math.max(2, ...chart.map((c) => c[1])), w = 100 / chart.length;
-    const bars = chart.map((c, i) => { const h = (c[1] / max) * 66, f = c[0] > now;
-      return `<rect x="${i * w}%" y="${70 - h}" width="${w * 0.8}%" height="${h}" fill="${f ? "#6b4fbb" : "#0a66c2"}" opacity="${f ? 0.55 : 0.9}"></rect>`; }).join("");
-    const ni = chart.findIndex((c) => c[0] > now), nx = (ni < 0 ? chart.length : ni) * w;
-    return `<svg width="100%" height="84" role="img" aria-label="Hourly rain">${bars}<line x1="${nx}%" x2="${nx}%" y1="0" y2="72" stroke="currentColor" stroke-dasharray="3 2"></line>
-      <text x="${nx}%" y="82" font-size="9" text-anchor="middle" fill="currentColor">now</text><text x="0" y="9" font-size="9" fill="currentColor">max ${max.toFixed(1)} mm/h</text></svg>
-      <div class="small muted">Past 48 h · next 24 h (faded)</div>`;
+  function placeRow(x) {
+    return `<a class="r" href="${dirLink(x.lat, x.lon)}" target="_blank" rel="noopener"><span class="ic">${PLACE_ICON[x.type]}</span><div class="m"><div class="n">${esc(x.name)}</div><div class="s">${esc(x.address || PLACE_NAME[x.type])}</div></div><span class="km">${km(x.km)}</span></a>`;
+  }
+  const asked = () => new Set([...state.mine.requests.map((r) => r.offer_id), ...store.get("asked", [])]);
+  function offerRow(o, kind) {
+    const unit = kind === "ride" ? "seats" : "spots";
+    return `<div class="offer"><span class="ic" style="font-size:1.5rem">${kind === "ride" ? "🚙" : "🏡"}</span><div class="m"><div class="n">${esc(o.area)}</div>
+      <div class="s">${km(o.km)} · ${o.spots_left} ${unit} free${o.note ? " · " + esc(o.note) : ""}</div>
+      <div class="tags">${o.pets ? `<span class="tag">Pets ok</span>` : ""}${o.accessible ? `<span class="tag">Wheelchair</span>` : ""}</div></div>
+      ${asked().has(o.id) ? `<span class="status pending">Sent ✓</span>` : `<button class="btn small" data-ask="${esc(o.id)}" data-kind="${kind}">${kind === "ride" ? "Ask for ride" : "Ask to stay"}</button>`}</div>`;
+  }
+  function bindAsk(root) {
+    $$("[data-ask]", root).forEach((b) => b.addEventListener("click", async () => {
+      if (!profileReady()) { toast("Add your name and phone first"); setTab("me"); return; }
+      b.disabled = true;
+      try {
+        const p = state.profile;
+        const r = await api("/api/shelter/request", { offer_id: b.dataset.ask, people: p.people || 1, pets: p.pets, needs: p.medical || "", name: p.name, contact: p.contact });
+        state.keys.requests.push({ id: r.id, token: r.token }); store.set("shelterKeys", state.keys);
+        store.set("asked", [...store.get("asked", []), b.dataset.ask].slice(-100));
+        b.textContent = "Sent ✓"; toast("Request sent. You'll see the reply in Help → Matches.");
+        refreshMine();
+      } catch (e) { b.disabled = false; toast(e.message); }
+    }));
+  }
+
+  // ---------- NEARBY (always available) ----------
+  function drawNearbyLayer() {
+    layers.places.clearLayers();
+    const C = { hospital: "#00838f", pharmacy: "#7b1fa2", grocery: "#558b2f", fuel: "#6b4fbb", shelter: "#0b6e4f" };
+    Object.entries(state.nearby?.places || {}).forEach(([t, list]) => list.forEach((x) =>
+      L.circleMarker([x.lat, x.lon], { radius: 7, color: "#fff", weight: 2, fillColor: C[t], fillOpacity: 0.95 })
+        .bindPopup(`${PLACE_ICON[t]} <strong>${esc(x.name)}</strong><br>${esc(x.address || "")}<br><a href="${dirLink(x.lat, x.lon)}" target="_blank" rel="noopener">Directions</a>`).addTo(layers.places)));
+  }
+  function renderNearby() {
+    const top = $("#nearby-top"), list = $("#nearby-list"), shell = $("#map-shell");
+    const n = state.nearby;
+    top.innerHTML = `<div><div class="title">Nearby</div><p class="sub">Closest to ${esc(placeName())}</p></div>
+      <div class="chips" style="margin-top:12px">${Object.keys(PLACE_ICON).map((t) => `<button data-cat="${t}" aria-pressed="${state.nearbyCat === t}">${PLACE_ICON[t]} ${PLACE_NAME[t]}</button>`).join("")}
+        <button data-view="${state.nearbyView === "map" ? "list" : "map"}" style="margin-left:auto">${state.nearbyView === "map" ? "☰ List" : "🗺️ Map"}</button></div>`;
+    $$("[data-cat]", top).forEach((b) => b.addEventListener("click", () => { state.nearbyCat = b.dataset.cat; state.nearbyView = "list"; renderNearby(); }));
+    $$("[data-view]", top).forEach((b) => b.addEventListener("click", () => { state.nearbyView = b.dataset.view; renderNearby(); }));
+    shell.hidden = state.nearbyView !== "map";
+    if (state.nearbyView === "map") {
+      list.innerHTML = `<p class="small muted">Tap the map to move your location. Layers: top right.</p>`;
+      setTimeout(() => { map.invalidateSize(); if (state.place) map.setView([state.place.lat, state.place.lon], Math.max(map.getZoom(), 12)); }, 30);
+      return;
+    }
+    const items = n?.places?.[state.nearbyCat] || [];
+    list.innerHTML = `<div class="card">${!n ? `<p class="empty">Loading...</p>` : items.length ? `<div class="rows">${items.map(placeRow).join("")}</div>`
+      : `<p class="empty">${n.in_coverage ? "None within 30 km." : "Float's place list covers Greater Houston for now."}${state.nearbyCat === "shelter" ? ` <a href="https://www.redcross.org/get-help/disaster-relief-and-recovery-services/find-an-open-shelter.html" target="_blank" rel="noopener">Red Cross shelters</a>` : ""}</p>`}
+      <p class="prov">${state.nearbyCat === "hospital" ? "Open status: call ahead." : "Open status and stock: unknown."} OpenStreetMap · tap a place for directions.</p></div>`;
+  }
+
+  // ---------- HELP: shelter + rides ----------
+  async function refreshMine() {
+    if (!state.keys.offers.length && !state.keys.requests.length) return;
+    try { state.mine = await api("/api/shelter/mine", state.keys); updateCounts(); if (["help", "home"].includes(state.tab)) renderAll(); }
+    catch (e) { console.warn("mine", e); }
+  }
+  async function loadHosts() {
+    if (!state.place) return;
+    layers.hosts.clearLayers();
+    for (const kind of ["shelter", "ride"]) {
+      const { offers } = await api(`/api/shelter/offers?lat=${state.place.lat}&lon=${state.place.lon}&kind=${kind}`).catch(() => ({ offers: [] }));
+      offers.forEach((o) => L.circleMarker([o.lat, o.lon], { radius: 9, color: "#fff", weight: 2, fillColor: kind === "ride" ? "#6b4fbb" : "#0a66c2", fillOpacity: 0.95 })
+        .bindPopup(`${kind === "ride" ? "🚙" : "🏡"} <strong>${esc(o.area)}</strong><br>${o.spots_left} ${kind === "ride" ? "seats" : "spots"} · ask in Help`).addTo(layers.hosts));
+    }
+  }
+  function defaultHelp() {
+    const r = state.profile?.role;
+    if (!state.help.mode) {
+      state.help.area = r === "need_ride" || r === "offer_ride" ? "ride" : "stay";
+      state.help.mode = r === "offer_shelter" || r === "offer_ride" ? "offer" : "need";
+    }
+  }
+  function renderHelp() {
+    defaultHelp();
+    const el = $("#tab-help"), h = state.help;
+    const pending = state.mine.offers.reduce((s, o) => s + o.requests.filter((r) => r.status === "pending").length, 0);
+    el.innerHTML = `<div><div class="title">Help</div><p class="sub">Places to stay and rides, from neighbors.</p></div>
+      <div class="calls" style="margin:0"><a class="call blue" href="tel:211">2-1-1<small>Official shelters, rides</small></a><a class="call blue" href="tel:18007332767">Red Cross<small>1-800-733-2767</small></a><a class="call" href="tel:911">911<small>Emergency</small></a></div>
+      <div class="seg"><button data-area="stay" aria-pressed="${h.area === "stay"}">🏠 Stay</button><button data-area="ride" aria-pressed="${h.area === "ride"}">🚗 Ride</button>
+        <button data-area="matches" aria-pressed="${h.area === "matches"}">✉️ Matches${pending ? ` (${pending})` : ""}</button></div>
+      ${h.area !== "matches" ? `<div class="toggle2"><button data-mode="need" aria-pressed="${h.mode === "need"}">${h.area === "ride" ? "🙋 I need a ride" : "🙋 I need a place"}</button>
+        <button data-mode="offer" aria-pressed="${h.mode === "offer"}">${h.area === "ride" ? "🚙 I can drive" : "🤝 I can host"}</button></div>` : ""}
+      <div id="help-body"></div>
+      <div class="card"><details class="why"><summary>Stay safe</summary><ul style="margin:8px 0 0;padding-left:20px"><li><strong>Neighbors are not vetted.</strong> Official shelters are.</li><li>Meet in public first. Tell someone your plan.</li><li>Contacts are shared only after a match is accepted.</li></ul></details></div>`;
+    $$("[data-area]", el).forEach((b) => b.addEventListener("click", () => { h.area = b.dataset.area; renderHelp(); }));
+    $$("[data-mode]", el).forEach((b) => b.addEventListener("click", () => { h.mode = b.dataset.mode; renderHelp(); }));
+    const body = $("#help-body");
+    if (h.area === "matches") return helpMatches(body);
+    const kind = h.area === "ride" ? "ride" : "shelter";
+    return h.mode === "offer" ? helpOffer(body, kind) : helpFind(body, kind);
+  }
+  async function helpFind(box, kind) {
+    const p = state.profile || { people: 1 };
+    box.innerHTML = `<div class="card"><h2>${kind === "ride" ? "Drivers near you" : "Places near you"}</h2>
+      <div class="small muted">For ${p.people || 1} ${(p.people || 1) > 1 ? "people" : "person"}${p.pets ? " + pets" : ""}${p.accessible ? " · wheelchair" : ""} · <button class="link" data-go="me" style="padding:0">edit</button></div>
+      <div class="rows" id="find-list"><p class="empty">Searching...</p></div></div>`;
+    bindGo(box);
+    if (!state.place) { $("#find-list").innerHTML = `<p class="empty">Set your location first.</p>`; return; }
+    try {
+      const { offers } = await api(`/api/shelter/offers?lat=${state.place.lat}&lon=${state.place.lon}&people=${p.people || 1}&pets=${p.pets ? 1 : 0}&accessible=${p.accessible ? 1 : 0}&kind=${kind}`);
+      const el = $("#find-list");
+      if (!el) return;                       // user moved on while loading
+      el.innerHTML = offers.length ? offers.map((o) => offerRow(o, kind)).join("") : `<p class="empty">Nobody nearby yet. Call 2-1-1${kind === "ride" ? " (STEAR evacuation rides)" : ""}.</p>`;
+      bindAsk(el);
+    } catch (e) { const el = $("#find-list"); if (el) el.innerHTML = `<p class="msg err">${esc(e.message)}</p>`; }
+  }
+  function helpOffer(box, kind) {
+    const p = state.profile || {};
+    const ride = kind === "ride";
+    box.innerHTML = `<div class="card"><h2>${ride ? "Offer rides" : "Offer a place"}</h2>
+      <form class="form" id="offer-form">
+        <div class="row2"><label class="field">${ride ? "Pickup area" : "Area"}<input name="area" required maxlength="80" placeholder="${ride ? "e.g. Katy, I-10 & Mason" : "e.g. Katy, near I-10"}"></label>
+          <label class="field">${ride ? "Seats" : "Spots"}<input name="spots" type="number" min="1" max="50" value="${ride ? 3 : 2}" required></label></div>
+        <div class="row2"><label class="check"><input type="checkbox" name="pets"> Pets ok</label><label class="check"><input type="checkbox" name="accessible"> ${ride ? "Wheelchair van" : "Wheelchair access"}</label></div>
+        <div class="row2"><label class="field">Your name<input name="name" required maxlength="60" value="${esc(p.name || "")}"></label><label class="field">Phone<input name="contact" required maxlength="120" value="${esc(p.contact || "")}"></label></div>
+        <label class="field">Note<input name="note" maxlength="300" placeholder="${ride ? "e.g. SUV, can tow" : "e.g. spare room, no stairs"}"></label>
+        <button class="btn block" type="submit">Post</button><div class="msg" id="offer-msg"></div>
+        <p class="small muted" style="margin:0">People see only your area (about 1 km), never your address or phone until you accept them.</p></form></div>`;
+    $("#offer-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!state.place) { toast("Set your location first"); return; }
+      const f = e.target;
+      try {
+        const r = await api("/api/shelter/offer", { kind, lat: state.place.lat, lon: state.place.lon, area: f.area.value, spots: f.spots.value,
+          pets: f.pets.checked, accessible: f.accessible.checked, name: f.name.value, contact: f.contact.value, note: f.note.value });
+        state.keys.offers.push({ id: r.id, token: r.token }); store.set("shelterKeys", state.keys);
+        toast("Posted. Thank you!"); state.help.area = "matches"; await refreshMine(); renderHelp(); loadHosts();
+      } catch (err) { $("#offer-msg").className = "msg err"; $("#offer-msg").textContent = err.message; }
+    });
+  }
+  function helpMatches(box) {
+    const { offers, requests } = state.mine;
+    if (!offers.length && !requests.length) { box.innerHTML = `<div class="card"><p class="empty">No offers or requests yet.</p></div>`; return; }
+    let html = "";
+    if (requests.length) html += `<div class="card"><h2>You asked</h2><div class="rows">${requests.map((r) => `<div class="offer" style="display:block">
+      <div style="display:flex;justify-content:space-between;gap:8px"><span class="n">${r.kind === "ride" ? "🚙" : "🏡"} ${esc(r.area)}</span><span class="status ${esc(r.status)}">${esc(r.status)}</span></div>
+      <div class="s">${r.people} ${r.people === 1 ? "person" : "people"} · ${esc(ago(r.created))}</div>
+      ${r.status === "accepted" ? `<div class="contact">📞 ${esc(r.host_name)} · ${esc(r.host_contact)}</div>` : ""}</div>`).join("")}</div></div>`;
+    for (const o of offers) html += `<div class="card"><h2>${o.kind === "ride" ? "🚙" : "🏡"} ${esc(o.area)}</h2><div class="muted">${o.spots_left} of ${o.spots} ${o.kind === "ride" ? "seats" : "spots"} free · ${o.active ? "listed" : "closed"}</div>
+      <div class="rows">${o.requests.length ? o.requests.map((r) => `<div class="offer" style="display:block">
+        <div style="display:flex;justify-content:space-between;gap:8px"><span class="n">${esc(r.name)} · ${r.people}</span><span class="status ${esc(r.status)}">${esc(r.status)}</span></div>
+        <div class="tags">${r.pets ? `<span class="tag">Pets</span>` : ""}${r.needs ? `<span class="tag">${esc(r.needs)}</span>` : ""}</div>
+        ${r.status === "pending" ? `<div style="display:flex;gap:8px;margin-top:10px"><button class="btn small" data-respond="accept" data-offer="${esc(o.id)}" data-req="${esc(r.id)}">Accept</button><button class="btn small ghost" data-respond="decline" data-offer="${esc(o.id)}" data-req="${esc(r.id)}">Decline</button></div>` : ""}
+        ${r.contact ? `<div class="contact">📞 ${esc(r.contact)}</div>` : ""}</div>`).join("") : `<p class="empty">No requests yet.</p>`}</div>
+      ${o.active ? `<button class="btn small danger" style="margin-top:10px" data-close="${esc(o.id)}">Close</button>` : ""}</div>`;
+    box.innerHTML = html;
+    $$("[data-respond]", box).forEach((b) => b.addEventListener("click", async () => {
+      const key = state.keys.offers.find((k) => k.id === b.dataset.offer);
+      try { await api("/api/shelter/respond", { offer_id: key.id, token: key.token, request_id: b.dataset.req, decision: b.dataset.respond });
+        toast(b.dataset.respond === "accept" ? "Accepted. Contacts shared." : "Declined"); await refreshMine(); renderHelp(); } catch (e) { toast(e.message); }
+    }));
+    $$("[data-close]", box).forEach((b) => b.addEventListener("click", async () => {
+      const key = state.keys.offers.find((k) => k.id === b.dataset.close);
+      await api("/api/shelter/close", key).catch(() => {}); toast("Closed"); await refreshMine(); renderHelp(); loadHosts();
+    }));
   }
 
   // ---------- ALERTS ----------
@@ -303,385 +517,213 @@
       state.inbox = await api("/api/alerts/inbox", { subs: state.subs });
       const known = new Set(state.inbox.subscriptions.map((s) => s.id));
       if (known.size !== state.subs.length) { state.subs = state.subs.filter((s) => known.has(s.id)); store.set("subs", state.subs); }
-      const fresh = state.inbox.notifications.filter((n) => !state.seen.has(n.id));
-      if (fresh.length && "Notification" in window && Notification.permission === "granted") {
-        for (const n of fresh.slice(0, 3)) {
-          if (store.get("popped", []).includes(n.id)) continue;
-          new Notification(`Float · ${n.title}`, { body: n.message, tag: n.id });
-          store.set("popped", [...store.get("popped", []), n.id].slice(-200));
-        }
+      const popped = store.get("popped", []);
+      if ("Notification" in window && Notification.permission === "granted") {
+        state.inbox.notifications.filter((n) => !state.seen.has(n.id) && !popped.includes(n.id)).slice(0, 3).forEach((n) => {
+          new Notification(`Float · ${n.title}`, { body: n.message, tag: n.id }); popped.push(n.id); });
+        store.set("popped", popped.slice(-200));
       }
       updateCounts();
       if (state.tab === "alerts") { markSeen(); renderAlerts(); }
     } catch (e) { console.warn("inbox", e); }
   }
-  function markSeen() {
-    state.inbox.notifications.forEach((n) => state.seen.add(n.id));
-    store.set("seenNotes", [...state.seen].slice(-500));
-    updateCounts();
-  }
+  function markSeen() { state.inbox.notifications.forEach((n) => state.seen.add(n.id)); store.set("seenNotes", [...state.seen].slice(-500)); updateCounts(); }
   function updateCounts() {
     const unread = state.inbox.notifications.filter((n) => !state.seen.has(n.id)).length;
     const a = $("#alerts-count"); a.hidden = !unread; a.textContent = unread;
     const pending = state.mine.offers.reduce((s, o) => s + o.requests.filter((r) => r.status === "pending").length, 0);
-    const s = $("#shelter-count"); s.hidden = !pending; s.textContent = pending;
+    const h = $("#help-count"); h.hidden = !pending; h.textContent = pending;
   }
   function renderAlerts() {
     const el = $("#tab-alerts");
     const subs = state.inbox.subscriptions, notes = state.inbox.notifications;
-    const sub = {
-      before: "Get warned up to 7 days before a flood.", during: "Keep alerts on. Official warnings come first.", after: "Stay subscribed: rivers can rise again.",
-    }[state.phase || "before"];
-    el.innerHTML = `<div><div class="page-title">Alerts</div><p class="page-sub">${sub}</p></div>
-      <div class="card"><h2>Turn on alerts</h2>
-        <form class="form" id="sub-form">${placeLine()}
-          <div class="row"><label class="field">Alert me at<select name="threshold"><option value="HIGH">High risk</option><option value="MODERATE">Moderate or higher</option></select></label>
-          <label class="field">Your name (optional)<input name="name" maxlength="60"></label></div>
-          <div><button class="btn" type="submit" ${state.point ? "" : "disabled"}>Turn on alerts</button> <span class="form-msg" id="sub-msg"></span></div>
-        </form></div>
-      <div class="card"><h2>Your places</h2>${subs.length ? `<div class="list">${subs.map((s) => `
-        <div class="item"><div><div class="t">${esc(s.label)}</div><div class="d">Alert at ${esc(s.threshold.toLowerCase())} · checked ${esc(ago(s.last_checked))}${s.last_peak ? ` · this week: <span class="${lvClass(s.last_peak.level)}">${esc(s.last_peak.level)}</span>` : ""}</div></div>
-        <button class="btn small danger" data-unsub="${esc(s.id)}">Remove</button></div>`).join("")}</div>` : `<p class="empty">None yet.</p>`}</div>
-      <div class="card"><h2>Inbox</h2>${notes.length ? `<div class="list">${notes.map((n) => `
-        <div class="item"><div>${badge(n.kind)} <span class="t">${esc(n.title)}</span><div class="d">${esc(n.message)}</div></div><span class="d">${esc(ago(n.created))}</span></div>`).join("")}</div>`
-        : `<p class="empty">No alerts. Float checks every 3 hours.</p>`}
-        <div class="prov">Pop-ups need Float open in a browser tab.</div></div>`;
-    bindGo(el);
-    $("#sub-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const f = e.target, msg = $("#sub-msg");
-      if (!state.point) return;
-      f.querySelector("button").disabled = true; msg.className = "form-msg"; msg.textContent = "Checking...";
+    const here = subs.find((s) => state.place && Math.abs(s.lat - state.place.lat) < 0.005 && Math.abs(s.lon - state.place.lon) < 0.005);
+    el.innerHTML = `<div><div class="title">Alerts</div><p class="sub">Warnings up to 7 days before a flood.</p></div>
+      <div class="card"><div class="r" style="border:0;padding:0"><span class="ic">🔔</span><div class="m"><div class="n">${esc(placeName())}</div><div class="s">${here ? `On · ${esc(here.threshold.toLowerCase())} risk or higher` : "Off"}</div></div>
+        <button class="switch" id="a-switch" aria-pressed="${!!here}" aria-label="Alerts for this place" ${state.place ? "" : "disabled"}></button></div>
+        ${here ? "" : `<label class="field" style="margin-top:14px">Warn me at<select id="a-level"><option value="HIGH">High risk</option><option value="MODERATE">Moderate or higher</option></select></label>`}</div>
+      ${subs.filter((s) => s !== here).length ? `<div class="card"><h2>Other places</h2><div class="rows">${subs.filter((s) => s !== here).map((s) => `<div class="r"><span class="ic">📍</span><div class="m"><div class="n">${esc(s.label)}</div><div class="s">${esc(s.threshold.toLowerCase())} or higher</div></div><button class="btn small danger" data-unsub="${esc(s.id)}">Remove</button></div>`).join("")}</div></div>` : ""}
+      <div class="card"><h2>Inbox</h2>${notes.length ? `<div class="rows">${notes.map((n) => `<div class="r"><span class="ic">${n.kind === "official" ? "🚨" : "🌊"}</span><div class="m"><div class="n">${esc(n.title)}</div><div class="s">${esc(n.message)}</div></div><span class="s">${esc(ago(n.created))}</span></div>`).join("")}</div>`
+        : `<p class="empty">Nothing yet. Checked every 3 hours.</p>`}<p class="prov">Pop-ups appear while Float is open.</p></div>`;
+    const sw = $("#a-switch");
+    sw.addEventListener("click", async () => {
+      sw.disabled = true;
       try {
-        if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission();
-        const r = await api("/api/alerts/subscribe", { lat: state.point.lat, lon: state.point.lon, label: placeName(), threshold: f.threshold.value, name: f.name.value });
-        state.subs.push({ id: r.id, token: r.token }); store.set("subs", state.subs);
-        await refreshInbox();
-        renderAlerts();
-        toast("Alerts on");
-      } catch (err) { msg.className = "form-msg err"; msg.textContent = err.message; f.querySelector("button").disabled = false; }
+        if (here) {
+          const key = state.subs.find((s) => s.id === here.id);
+          await api("/api/alerts/unsubscribe", key); state.subs = state.subs.filter((s) => s.id !== here.id); toast("Alerts off");
+        } else {
+          if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission();
+          const r = await api("/api/alerts/subscribe", { lat: state.place.lat, lon: state.place.lon, label: placeName(), threshold: $("#a-level").value, name: state.profile?.name || "" });
+          state.subs.push({ id: r.id, token: r.token }); toast("Alerts on");
+        }
+        store.set("subs", state.subs); await refreshInbox(); renderAlerts();
+      } catch (e) { toast(e.message); sw.disabled = false; }
     });
     $$("[data-unsub]", el).forEach((b) => b.addEventListener("click", async () => {
-      const s = state.subs.find((x) => x.id === b.dataset.unsub);
-      if (!s) return;
-      await api("/api/alerts/unsubscribe", s).catch(() => {});
-      state.subs = state.subs.filter((x) => x.id !== s.id); store.set("subs", state.subs);
-      await refreshInbox(); renderAlerts(); toast("Removed");
+      const key = state.subs.find((s) => s.id === b.dataset.unsub);
+      await api("/api/alerts/unsubscribe", key).catch(() => {}); state.subs = state.subs.filter((s) => s.id !== key.id); store.set("subs", state.subs);
+      await refreshInbox(); renderAlerts();
     }));
   }
 
-  // ---------- SHELTER ----------
-  async function refreshMine() {
-    if (!state.keys.offers.length && !state.keys.requests.length) return;
-    try { state.mine = await api("/api/shelter/mine", state.keys); updateCounts(); if (state.tab === "shelter" && state.shelterView === "mine") renderShelter(); }
-    catch (e) { console.warn("mine", e); }
-  }
-  async function loadHosts() {
-    if (!state.point) return;
-    try {
-      const { offers } = await api(`/api/shelter/offers?lat=${state.point.lat}&lon=${state.point.lon}`);
-      layers.hosts.clearLayers();
-      offers.forEach((o) => L.circleMarker([o.lat, o.lon], { radius: 9, color: "#fff", weight: 2, fillColor: "#0a66c2", fillOpacity: 0.95 })
-        .bindPopup(`<strong>${esc(o.area)}</strong><br>${o.spots_left} spots${o.pets ? " · pets ok" : ""}${o.accessible ? " · wheelchair" : ""}<br><span class="muted">Approximate area · ask in the Shelter tab</span>`).addTo(layers.hosts));
-    } catch (e) { console.warn("hosts", e); }
-  }
-  function renderShelter() {
-    const el = $("#tab-shelter");
-    const head = { before: ["Plan where you'd go", "Line up a place now, or offer one."], during: ["Need shelter now?", "Official shelters first. Hosts nearby below."],
-      after: ["Place to stay", "Temporary housing while you recover."] }[state.phase || "before"];
-    const pendingIn = state.mine.offers.reduce((s, o) => s + o.requests.filter((r) => r.status === "pending").length, 0);
-    const view = state.shelterView;
-    el.innerHTML = `<div><div class="page-title">${esc(head[0])}</div><p class="page-sub">${esc(head[1])}</p></div>
-      <div class="callout official"><strong>Official shelters:</strong> Red Cross <strong>1-800-733-2767</strong> · Dial <strong>2-1-1</strong>${state.phase === "after" ? " · FEMA housing: <strong>DisasterAssistance.gov</strong>" : ""}
-        · <a href="https://www.redcross.org/get-help/disaster-relief-and-recovery-services/find-an-open-shelter.html" target="_blank" rel="noopener">Find open shelters</a></div>
-      <div class="seg" role="group"><button data-view="find" aria-pressed="${view === "find"}">Find a host</button>
-        <button data-view="offer" aria-pressed="${view === "offer"}">Offer a place</button>
-        <button data-view="mine" aria-pressed="${view === "mine"}">My matches${pendingIn ? ` (${pendingIn})` : ""}</button></div>
-      <div id="shelter-view"></div>
-      <div class="card"><details class="why"><summary>Stay safe</summary><ul class="tight small">
-        <li><strong>Hosts are not vetted.</strong> Official shelters are.</li><li>Meet first in a public place.</li>
-        <li>Tell someone where you're going.</li><li>Exact addresses are shared only after a host accepts.</li></ul></details></div>`;
-    $$(".seg button", el).forEach((b) => b.addEventListener("click", () => { state.shelterView = b.dataset.view; renderShelter(); }));
-    ({ find: shelterFind, offer: shelterOffer, mine: shelterMine })[view]($("#shelter-view"));
-  }
-  function shelterFind(box) {
-    const f = store.get("findPrefs", { people: 1, pets: false, accessible: false });
-    box.innerHTML = `<div class="card"><h2>Find a host</h2>${placeLine()}
-      <form class="form" id="find-form"><div class="row">
-        <label class="field">People<input name="people" type="number" min="1" max="50" value="${f.people}"></label>
-        <label class="check"><input type="checkbox" name="pets" ${f.pets ? "checked" : ""}> Pets</label>
-        <label class="check"><input type="checkbox" name="accessible" ${f.accessible ? "checked" : ""}> Wheelchair access</label></div>
-        <div><button class="btn" type="submit" ${state.point ? "" : "disabled"}>Search nearby</button></div></form></div>
-      <div id="find-results"></div>`;
-    bindGo(box);
-    const form = $("#find-form");
-    const run = async () => {
-      const prefs = { people: Math.max(1, +form.people.value || 1), pets: form.pets.checked, accessible: form.accessible.checked };
-      store.set("findPrefs", prefs);
-      const res = $("#find-results");
-      res.innerHTML = `<div class="card"><p class="empty">Searching...</p></div>`;
-      try {
-        const { offers } = await api(`/api/shelter/offers?lat=${state.point.lat}&lon=${state.point.lon}&people=${prefs.people}&pets=${prefs.pets ? 1 : 0}&accessible=${prefs.accessible ? 1 : 0}`);
-        res.innerHTML = `<div class="card"><h2>${offers.length} ${offers.length === 1 ? "host" : "hosts"} within 80 km</h2>${offers.length ? `<div class="list">${offers.map((o) => `
-          <div class="item" style="display:block"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><div class="t">${esc(o.area)}</div>
-            <div class="d">${o.km} km · ${o.spots_left} of ${o.spots} spots free${o.available_from ? ` · from ${esc(o.available_from)}` : ""}${o.available_to ? ` to ${esc(o.available_to)}` : ""}</div>
-            <div class="tags">${o.pets ? `<span class="tag">Pets ok</span>` : ""}${o.accessible ? `<span class="tag">Wheelchair</span>` : ""}</div>
-            ${o.note ? `<div class="small" style="margin-top:4px">${esc(o.note)}</div>` : ""}</div>
-            <button class="btn small" data-ask="${esc(o.id)}">Ask to stay</button></div>
-            <form class="form ask-form" data-offer="${esc(o.id)}" hidden style="margin-top:10px"><div class="row">
-              <label class="field">Your name<input name="name" required maxlength="60"></label>
-              <label class="field">Phone or email<input name="contact" required maxlength="120"></label></div>
-              <label class="field">Needs (optional)<input name="needs" maxlength="200" placeholder="e.g. medicine fridge, crib"></label>
-              <div><button class="btn small" type="submit">Send request</button> <span class="form-msg"></span></div></form></div>`).join("")}</div>`
-          : `<p class="empty">No hosts match yet. Try fewer filters, or call 2-1-1.</p>`}</div>`;
-        $$("[data-ask]", res).forEach((b) => b.addEventListener("click", () => { res.querySelector(`.ask-form[data-offer="${b.dataset.ask}"]`).hidden = false; b.hidden = true; }));
-        $$(".ask-form", res).forEach((af) => af.addEventListener("submit", async (e) => {
-          e.preventDefault();
-          const msg = af.querySelector(".form-msg");
-          try {
-            const r = await api("/api/shelter/request", { offer_id: af.dataset.offer, people: prefs.people, pets: prefs.pets,
-              needs: af.needs.value, name: af.name.value, contact: af.contact.value });
-            state.keys.requests.push({ id: r.id, token: r.token }); store.set("shelterKeys", state.keys);
-            af.innerHTML = `<p class="form-msg ok">Request sent. Check <button class="link-btn" type="button" data-view-mine>My matches</button>.</p>`;
-            af.querySelector("[data-view-mine]").addEventListener("click", () => { state.shelterView = "mine"; renderShelter(); });
-            refreshMine();
-          } catch (err) { msg.className = "form-msg err"; msg.textContent = err.message; }
-        }));
-      } catch (err) { res.innerHTML = `<div class="card"><p class="form-msg err">${esc(err.message)}</p></div>`; }
-    };
-    form.addEventListener("submit", (e) => { e.preventDefault(); run(); });
-    if (state.point) run();
-  }
-  function shelterOffer(box) {
-    box.innerHTML = `<div class="card"><h2>Offer a place</h2>
-      <form class="form" id="offer-form">${placeLine()}
-        <p class="small muted" style="margin:0">Others see only an area about 1 km wide. Your contact is shared when you accept someone.</p>
-        <div class="row"><label class="field">Area name<input name="area" required maxlength="80" placeholder="e.g. Katy, near I-10"></label>
-          <label class="field">Spots<input name="spots" type="number" min="1" max="50" value="2" required></label></div>
-        <div class="row"><label class="check"><input type="checkbox" name="pets"> Pets ok</label><label class="check"><input type="checkbox" name="accessible"> Wheelchair accessible</label></div>
-        <div class="row"><label class="field">Available from<input name="available_from" type="date"></label><label class="field">Until<input name="available_to" type="date"></label></div>
-        <div class="row"><label class="field">Your name<input name="name" required maxlength="60"></label><label class="field">Phone or email<input name="contact" required maxlength="120"></label></div>
-        <label class="field">Note (optional)<input name="note" maxlength="300" placeholder="e.g. spare room, sofa, no stairs"></label>
-        <div><button class="btn" type="submit" ${state.point ? "" : "disabled"}>Post offer</button> <span class="form-msg" id="offer-msg"></span></div></form></div>`;
-    bindGo(box);
-    $("#offer-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const f = e.target, msg = $("#offer-msg");
-      try {
-        const r = await api("/api/shelter/offer", { lat: state.point.lat, lon: state.point.lon, area: f.area.value, spots: f.spots.value,
-          pets: f.pets.checked, accessible: f.accessible.checked, available_from: f.available_from.value, available_to: f.available_to.value,
-          name: f.name.value, contact: f.contact.value, note: f.note.value });
-        state.keys.offers.push({ id: r.id, token: r.token }); store.set("shelterKeys", state.keys);
-        toast("Offer posted. Thank you!");
-        state.shelterView = "mine";
-        await refreshMine(); renderShelter(); loadHosts();
-      } catch (err) { msg.className = "form-msg err"; msg.textContent = err.message; }
-    });
-  }
-  function shelterMine(box) {
-    const { offers, requests } = state.mine;
-    if (!offers.length && !requests.length) { box.innerHTML = `<div class="card"><p class="empty">No offers or requests yet.</p></div>`; return; }
-    let html = "";
-    if (requests.length) html += `<div class="card"><h2>Your requests</h2><div class="list">${requests.map((r) => `
-      <div class="item" style="display:block"><div style="display:flex;justify-content:space-between"><span class="t">${esc(r.area)}</span><span class="status ${esc(r.status)}">${esc(r.status)}</span></div>
-      <div class="d">${r.people} ${r.people === 1 ? "person" : "people"} · sent ${esc(ago(r.created))}</div>
-      ${r.status === "accepted" ? `<div class="contact">Host: ${esc(r.host_name)} · ${esc(r.host_contact)}<br><span class="small">Call or text to arrange.</span></div>` : ""}</div>`).join("")}</div></div>`;
-    for (const o of offers) html += `<div class="card"><h2>Your offer: ${esc(o.area)}</h2>
-      <div class="d">${o.spots_left} of ${o.spots} spots free · ${o.active ? "<strong>listed</strong>" : "closed"}</div>
-      ${o.requests.length ? `<div class="list">${o.requests.map((r) => `<div class="item" style="display:block">
-        <div style="display:flex;justify-content:space-between"><span class="t">${esc(r.name)} · ${r.people} ${r.people === 1 ? "person" : "people"}</span><span class="status ${esc(r.status)}">${esc(r.status)}</span></div>
-        <div class="tags">${r.pets ? `<span class="tag">Pets</span>` : ""}${r.needs ? `<span class="tag">${esc(r.needs)}</span>` : ""}</div>
-        ${r.status === "pending" ? `<div style="margin-top:8px;display:flex;gap:8px"><button class="btn small" data-respond="accept" data-offer="${esc(o.id)}" data-req="${esc(r.id)}">Accept</button>
-          <button class="btn small ghost" data-respond="decline" data-offer="${esc(o.id)}" data-req="${esc(r.id)}">Decline</button></div>` : ""}
-        ${r.contact ? `<div class="contact">Contact: ${esc(r.contact)}</div>` : ""}</div>`).join("")}</div>` : `<p class="empty">No requests yet.</p>`}
-      ${o.active ? `<div style="margin-top:10px"><button class="btn small danger" data-close="${esc(o.id)}">Close offer</button></div>` : ""}</div>`;
-    box.innerHTML = html;
-    $$("[data-respond]", box).forEach((b) => b.addEventListener("click", async () => {
-      const key = state.keys.offers.find((k) => k.id === b.dataset.offer);
-      try { await api("/api/shelter/respond", { offer_id: key.id, token: key.token, request_id: b.dataset.req, decision: b.dataset.respond });
-        toast(b.dataset.respond === "accept" ? "Accepted. Contacts shared." : "Declined"); await refreshMine(); renderShelter(); }
-      catch (err) { toast(err.message); }
-    }));
-    $$("[data-close]", box).forEach((b) => b.addEventListener("click", async () => {
-      const key = state.keys.offers.find((k) => k.id === b.dataset.close);
-      await api("/api/shelter/close", key).catch(() => {}); toast("Offer closed"); await refreshMine(); renderShelter(); loadHosts();
-    }));
-  }
-
-  // ---------- GUIDES ----------
+  // ---------- GUIDES (+ damage photos) ----------
   const GUIDES = {
-    before: [
-      ["Build a kit", ["Water: 1 gallon per person per day, 3 days", "Medicines for 7 days", "IDs + insurance in a waterproof bag", "Chargers, battery pack, flashlight", "Cash and a first-aid kit"]],
-      ["Make a plan", ["Pick where you'd go (Shelter tab)", "Agree on one contact person", "Plan for pets", "Plan for medical devices and mobility"]],
-      ["Protect your home", ["Photograph every room (Recovery tab)", "Move valuables up high", "Clear drains and gutters", "Flood insurance takes 30 days to start"]],
-      ["Know your risk", ["Check your FEMA zone (Home)", "Turn on alerts (Alerts tab)", "Learn your nearest high ground"]],
-    ],
-    during: [
-      ["Evacuate", ["Leave when officials say so", "Take kit, medicines, pets", "Turn off power at the main, if dry and safe", "Tell your contact where you're going"]],
-      ["Water and roads", ["<strong>Turn around, don't drown</strong>", "6 in of moving water knocks you down", "1 ft can float a car", "Avoid underpasses and low crossings"]],
-      ["Power and gas", ["Stay 35 ft from downed lines", "Smell gas? Leave on foot. No switches or phones inside", "Then call CenterPoint 1-888-876-5786 and 911", "Generators outside only (carbon monoxide)"]],
-      ["Stay informed", ["Official alerts: Home tab", "Local radio or TV", "Charge your phone; save battery"]],
-    ],
-    after: [
-      ["Return safely", ["Wait for the official all-clear", "Check the river is falling (Home)", "Watch for snakes, debris, weak floors", "Wet wiring? Electrician before power on"]],
-      ["Clean up", ["Gloves, boots, mask", "Dry out within 24–48 h to stop mold", "Throw out food that touched flood water", "Boil water until your utility says it's safe"]],
-      ["Claims and aid", ["Photograph damage before cleaning (Recovery)", "List damaged items with prices", "Call your insurer", "FEMA: DisasterAssistance.gov · 1-800-621-3362"]],
-      ["Get help", ["Dial 2-1-1 for local services", "Red Cross 1-800-733-2767", "Find a place to stay (Shelter tab)"]],
-    ],
+    before: [["🎒", "Build a kit", ["Water: 1 gallon per person per day, 3 days", "Medicines for 7 days", "IDs and insurance in a waterproof bag", "Chargers, battery pack, flashlight", "Cash and first aid"]],
+      ["🗺️", "Make a plan", ["Pick where you'd go (Help tab)", "One contact person everyone knows", "Plan for pets", "Plan for medical devices"]],
+      ["🏡", "Protect your home", ["Photograph every room (below)", "Move valuables up high", "Clear drains and gutters", "Flood insurance takes 30 days to start"]]],
+    during: [["🚪", "Evacuate", ["Leave when officials say so", "Take kit, medicines, pets", "Power off at the main if dry and safe", "Tell your contact where you're going"]],
+      ["🚗", "Water and roads", ["<strong>Turn around, don't drown</strong>", "6 inches of moving water knocks you down", "1 foot can float a car", "Avoid underpasses"]],
+      ["⚡", "Power and gas", ["Stay 35 ft from downed lines", "Smell gas? Leave on foot, no switches", "Call CenterPoint 1-888-876-5786 and 911 outside", "Generators outside only"]]],
+    after: [["🔙", "Return safely", ["Wait for the official all-clear", "Check the river is falling (Home)", "Watch for snakes and debris", "Wet wiring? Electrician first"]],
+      ["🧽", "Clean up", ["Gloves, boots, mask", "Dry out in 24–48 h to stop mold", "Toss food that touched flood water", "Boil water until told it's safe"]],
+      ["📋", "Claims and aid", ["Photograph damage before cleaning (below)", "Call your insurer", "FEMA: DisasterAssistance.gov · 1-800-621-3362", "Local help: dial 2-1-1"]]],
   };
-  function renderGuides() {
-    const p = state.phase || "before";
-    $("#tab-guides").innerHTML = `<div><div class="page-title">Guides</div><p class="page-sub">${{ before: "Before a flood", during: "During a flood", after: "After a flood" }[p]}</p></div>
-      ${GUIDES[p].map(([t, items], i) => `<details class="guide" ${i === 0 ? "open" : ""}><summary>${esc(t)}</summary><ul>${items.map((x) => `<li>${x}</li>`).join("")}</ul></details>`).join("")}`;
-  }
-
-  // ---------- RECOVERY ----------
   async function loadEvidence() { try { state.evidence = (await api("/api/evidence")).records; } catch { state.evidence = []; } }
-  function renderRecovery() {
-    const el = $("#tab-recovery");
-    const head = { before: ["Photograph your home now", "\"Before\" photos make claims faster."], during: ["Safety first", "Document damage only when it's safe."],
-      after: ["Document damage", "Photos before cleanup. Each one is time-stamped and fingerprinted."] }[state.phase || "before"];
-    el.innerHTML = `<div><div class="page-title">${esc(head[0])}</div><p class="page-sub">${esc(head[1])}</p></div>
-      <div class="card no-print"><h2>Add a photo ${badge("experimental")}</h2>
+  function renderGuides() {
+    const p = state.phase || "before", el = $("#tab-guides");
+    const photo = p !== "during";
+    el.innerHTML = `<div><div class="title">${{ before: "Get ready", during: "Stay safe", after: "Recover" }[p]}</div><p class="sub">${{ before: "Before a flood", during: "During a flood", after: "After a flood" }[p]}</p></div>
+      ${GUIDES[p].map(([e, t, items], i) => `<details class="guide" ${i === 0 ? "open" : ""}><summary><span class="e">${e}</span>${esc(t)}</summary><ul>${items.map((x) => `<li>${x}</li>`).join("")}</ul></details>`).join("")}
+      ${photo ? `<div class="card no-print"><h2>📸 ${p === "after" ? "Document damage" : "Photograph your home"}</h2>
+        <p class="muted" style="margin-top:0">${p === "after" ? "Before cleanup. Time-stamped and fingerprinted for claims." : "\"Before\" photos speed up claims."}</p>
         <form class="form" id="ev-form"><label class="field">Photo<input id="ev-file" type="file" accept="image/*" capture="environment" required></label>
-          <label class="field">Note<input id="ev-note" maxlength="300" placeholder="Room, item, water line height"></label>
-          <label class="check"><input type="checkbox" id="ev-loc" checked> Attach my place</label>
-          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" type="submit" id="ev-submit">Analyze and save</button>
-          <button class="btn ghost" type="button" id="ev-print">Print claim packet</button></div></form></div>
-      <div class="card"><h2>Your photos (${state.evidence.length})</h2>${state.evidence.length ? state.evidence.map((r) => `<div class="evidence-rec">
-        <img src="/evidence/${esc(r.file)}" alt="Evidence photo"><div class="small"><strong>${esc(clock(r.captured_at))}</strong>${r.note ? " · " + esc(r.note) : ""}<br>
-        AI: <strong>${r.analysis.classifier.label === "flood" ? "flood" : "no flood"}</strong> (${pct(r.analysis.classifier.flood_probability)})<br>
-        ${r.analysis.qwen ? esc(r.analysis.qwen.description) + "<br>" : ""}<span class="mono">SHA-256 ${esc(r.sha256)}</span></div></div>`).join("") : `<p class="empty">No photos yet.</p>`}</div>
-      ${state.phase === "after" ? `<div class="card"><h2>Get help</h2><div class="list">
-        <div class="item"><span><strong>FEMA aid</strong><div class="d">1-800-621-3362</div></span><a href="https://www.disasterassistance.gov/" target="_blank" rel="noopener">DisasterAssistance.gov</a></div>
-        <div class="item"><span><strong>Flood insurance claim</strong><div class="d">NFIP</div></span><a href="https://www.floodsmart.gov/" target="_blank" rel="noopener">FloodSmart.gov</a></div>
-        <div class="item"><span><strong>Disaster declarations</strong></span><a href="https://www.fema.gov/disaster/declarations" target="_blank" rel="noopener">FEMA.gov</a></div></div></div>` : ""}`;
-    const readFile = (file) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsDataURL(file); });
+          <label class="field">Note<input id="ev-note" maxlength="300" placeholder="Room, item, water line"></label>
+          <div class="row2"><button class="btn" type="submit" id="ev-submit">Save photo</button><button class="btn ghost" type="button" id="ev-print">Print for insurance</button></div></form>
+        ${state.evidence.length ? `<div style="margin-top:8px">${state.evidence.map((r) => `<div class="evidence-rec"><img src="/evidence/${esc(r.file)}" alt="">
+          <div class="small"><strong>${esc(clock(r.captured_at))}</strong>${r.note ? " · " + esc(r.note) : ""}<br>AI: ${r.analysis.classifier.label === "flood" ? "flood damage" : "no flood"} (${pct(r.analysis.classifier.flood_probability)})<br>
+          ${r.analysis.qwen ? esc(r.analysis.qwen.description) + "<br>" : ""}<span class="mono">SHA-256 ${esc(r.sha256.slice(0, 32))}…</span></div></div>`).join("")}</div>` : ""}</div>` : ""}`;
+    if (!photo) return;
+    const readFile = (f) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsDataURL(f); });
     $("#ev-form").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const file = $("#ev-file").files[0];
-      if (!file) return;
+      const file = $("#ev-file").files[0]; if (!file) return;
       const btn = $("#ev-submit"); btn.disabled = true; btn.textContent = "Analyzing...";
       try {
         const body = { image: await readFile(file), note: $("#ev-note").value, use_qwen: true };
-        if ($("#ev-loc").checked && state.point) Object.assign(body, { lat: state.point.lat, lon: state.point.lon });
-        await api("/api/evidence", body);
-        await loadEvidence(); renderRecovery(); toast("Photo saved");
-      } catch (err) { toast("Could not save: " + err.message); btn.disabled = false; btn.textContent = "Analyze and save"; }
+        if (state.place) Object.assign(body, { lat: state.place.lat, lon: state.place.lon });
+        await api("/api/evidence", body); await loadEvidence(); renderGuides(); toast("Photo saved");
+      } catch (err) { toast("Could not save: " + err.message); btn.disabled = false; btn.textContent = "Save photo"; }
     });
     $("#ev-print").addEventListener("click", () => window.print());
   }
 
-  // ---------- MAP tab ----------
-  function renderMapTab() { $("#map-place").innerHTML = `Your place: <strong>${esc(placeName())}</strong> · tap the map to change it`; }
-
-  // ---------- MANAGER ----------
-  async function renderManager() {
-    const el = $("#tab-manager");
-    el.innerHTML = `<div><div class="page-title">Where to help first</div><p class="page-sub">Areas ranked by flooding, vulnerability and hospital access.</p></div><div class="card"><p class="empty">Loading...</p></div>`;
+  // ---------- ME (profile + settings) ----------
+  async function saveProfile(fields, quiet) {
+    const body = { ...fields, ...(state.profileKey || {}) };
+    if (state.place) Object.assign(body, { lat: state.place.lat, lon: state.place.lon, label: placeName() });
     try {
-      const p = await api("/api/priorities");
-      el.innerHTML = `<div><div class="page-title">Where to help first</div><p class="page-sub">Areas ranked by flooding, vulnerability and hospital access.</p></div>
-        <div class="card"><div class="table-wrap"><table><thead><tr><th>#</th><th>Area</th><th>Score</th><th>Flooded</th><th>Vulnerability</th><th>Hospitals ≤10 km</th></tr></thead><tbody>
-        ${p.areas.map((a, i) => `<tr><td>${i + 1}</td><td><strong>${esc(a.locality)}</strong><div class="small muted">${esc(a.county)}</div></td><td><strong>${a.score}</strong></td>
-          <td>${Math.round(a.flood_share * 100)}%</td><td>${a.vulnerability.toFixed(2)}</td><td>${a.in_essentials_area ? a.hospitals_10km : "–"}</td></tr>`).join("")}</tbody></table></div>
-        <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap"><button class="btn small" id="mgr-map">Show top 5 on map</button></div>
-        <details class="why" style="margin-top:10px"><summary>How the score works</summary><p class="small">${esc(p.formula)}</p><p class="small muted">${esc(p.note)}</p></details></div>`;
-      $("#mgr-map").addEventListener("click", () => {
-        layers.manager.clearLayers();
-        p.areas.slice(0, 5).forEach((a, i) => L.marker([a.lat, a.lon]).bindTooltip(`#${i + 1} ${a.locality}`, { permanent: true, direction: "right" }).addTo(layers.manager));
-        setTab("map");
-        setTimeout(() => map.fitBounds(L.latLngBounds(p.areas.slice(0, 5).map((a) => [a.lat, a.lon])).pad(0.3)), 80);
-      });
-    } catch (e) { el.innerHTML += `<p class="form-msg err">${esc(e.message)}</p>`; }
+      const r = await api("/api/profile/save", body);
+      state.profileKey = { id: r.id, token: r.token }; store.set("profileKey", state.profileKey);
+      const { token, ...pub } = r; state.profile = pub; store.set("profile", pub);
+      if (!quiet) toast("Profile saved");
+    } catch (e) {
+      if (state.profileKey && /token|Unknown record/i.test(e.message)) { state.profileKey = null; store.set("profileKey", null); return saveProfile(fields, quiet); }
+      state.profile = { ...fields }; store.set("profile", state.profile);
+      if (!quiet) toast("Saved on this device (server unavailable)");
+    }
+    state.help.mode = null;
+  }
+  function renderMe() {
+    const el = $("#tab-me"), p = state.profile || { role: "informed", people: 1, has_car: true };
+    el.innerHTML = `<div><div class="title">Me</div><p class="sub">So Float can connect you to the right help.</p></div>
+      <form class="card form" id="me-form"><h2>I'm here because...</h2>
+        <div class="roles">${Object.entries(ROLES).map(([k, [e, t]]) => `<button type="button" class="role" data-role="${k}" aria-pressed="${p.role === k}"><span class="e">${e}</span><strong>${esc(t)}</strong></button>`).join("")}</div>
+        <h2 style="margin-top:8px">My household</h2>
+        <div class="row2"><label class="field">People<input name="people" type="number" min="1" max="50" value="${p.people || 1}"></label>
+          <label class="field">Medical needs<input name="medical" maxlength="200" value="${esc(p.medical || "")}" placeholder="e.g. oxygen, insulin"></label></div>
+        <div class="row2"><label class="check"><input type="checkbox" name="pets" ${p.pets ? "checked" : ""}> Pets</label><label class="check"><input type="checkbox" name="accessible" ${p.accessible ? "checked" : ""}> Wheelchair</label>
+          <label class="check"><input type="checkbox" name="has_car" ${p.has_car !== false ? "checked" : ""}> Have a car</label></div>
+        <h2 style="margin-top:8px">Contact</h2>
+        <div class="row2"><label class="field">Name<input name="name" maxlength="60" value="${esc(p.name || "")}"></label><label class="field">Phone<input name="contact" maxlength="120" value="${esc(p.contact || "")}" inputmode="tel"></label></div>
+        <p class="small muted" style="margin:0">Shared only with a host or driver after you're matched.</p>
+        <button class="btn block" type="submit">Save</button></form>
+      <div class="card settings"><h2>Settings</h2><div class="rows">
+        <div class="r" id="set-loc"><span class="ic">📍</span><div class="m"><div class="n">Location</div><div class="s">${esc(placeName())}</div></div><span class="km">›</span></div>
+        <div class="r"><span class="ic">🔁</span><div class="m"><div class="n">Auto Before/During/After</div><div class="s">Switches to During when flooding is likely</div></div><button class="switch" id="set-auto" aria-pressed="${!store.get("phaseManual", false)}" aria-label="Automatic phase"></button></div>
+        <div class="r"><span class="ic">🔠</span><div class="m"><div class="n">Larger text</div></div><button class="switch" data-pref="large-text" aria-pressed="${document.body.classList.contains("large-text")}" aria-label="Larger text"></button></div>
+        <div class="r"><span class="ic">🌓</span><div class="m"><div class="n">High contrast</div></div><button class="switch" data-pref="high-contrast" aria-pressed="${document.body.classList.contains("high-contrast")}" aria-label="High contrast"></button></div>
+        <div class="r" data-go="manager"><span class="ic">📊</span><div class="m"><div class="n">Where to help first</div><div class="s">For emergency managers</div></div><span class="km">›</span></div>
+        <div class="r" data-go="about"><span class="ic">ℹ️</span><div class="m"><div class="n">About Float</div><div class="s">Data sources and AI accuracy</div></div><span class="km">›</span></div></div></div>`;
+    let role = p.role;
+    $$("[data-role]", el).forEach((b) => b.addEventListener("click", () => { role = b.dataset.role; $$("[data-role]", el).forEach((x) => x.setAttribute("aria-pressed", String(x === b))); }));
+    $("#me-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      await saveProfile({ role, people: Math.max(1, +f.people.value || 1), medical: f.medical.value, pets: f.pets.checked, accessible: f.accessible.checked,
+        has_car: f.has_car.checked, name: f.name.value, contact: f.contact.value });
+      setTab("home");
+    });
+    bindGo(el);
+    $("#set-loc").addEventListener("click", () => showWelcome("location"));
+    $("#set-auto").addEventListener("click", (e) => { const on = e.currentTarget.getAttribute("aria-pressed") !== "true"; store.set("phaseManual", !on); e.currentTarget.setAttribute("aria-pressed", String(on)); if (on) autoPhase(); });
+    $$("[data-pref]", el).forEach((b) => b.addEventListener("click", () => {
+      const cls = b.dataset.pref, v = !document.body.classList.contains(cls);
+      document.body.classList.toggle(cls, v); b.setAttribute("aria-pressed", String(v)); store.set(cls, v);
+    }));
   }
 
-  // ---------- ABOUT ----------
+  // ---------- MANAGER + ABOUT (from Me) ----------
+  const back = `<button class="link" data-go="me" style="align-self:flex-start;padding:0">← Me</button>`;
+  async function renderManager() {
+    const el = $("#tab-manager");
+    el.innerHTML = `${back}<div class="title">Where to help first</div><div class="card"><p class="empty">Loading...</p></div>`;
+    bindGo(el);
+    try {
+      const p = await api("/api/priorities");
+      el.innerHTML = `${back}<div><div class="title">Where to help first</div><p class="sub">Flooding × vulnerability × hospital access</p></div>
+        <div class="card"><div class="rows">${p.areas.map((a, i) => `<div class="r"><span class="ic" style="font-weight:900;font-size:1.1rem">${i + 1}</span><div class="m"><div class="n">${esc(a.locality)}</div>
+          <div class="s">${Math.round(a.flood_share * 100)}% flooded · vulnerability ${a.vulnerability.toFixed(2)}${a.in_essentials_area ? ` · ${a.hospitals_10km} hospitals ≤10 km` : ""}</div></div><span class="km">${a.score}</span></div>`).join("")}</div>
+          <details class="why" style="margin-top:12px"><summary>How the score works</summary><p class="small">${esc(p.formula)}</p><p class="small muted">${esc(p.note)}</p></details></div>`;
+      bindGo(el);
+    } catch (e) { el.innerHTML += `<p class="msg err">${esc(e.message)}</p>`; }
+  }
   async function renderAbout() {
     const el = $("#tab-about");
     try {
       const m = state.meta || (state.meta = await api("/api/meta"));
       const r = m.metrics.risk_model, im = m.metrics.image_model;
-      const row = (k, s) => `<tr><td>${esc(k)}</td><td>${s.pr_auc ?? "–"}</td><td>${s.recall}</td><td>${s.precision}</td><td>${s.false_positive_rate}</td></tr>`;
-      el.innerHTML = `<div><div class="page-title">About Float</div><p class="page-sub">Flood safety for Houston, built on the Dell Pro Max GB10.</p></div>
-        <div class="card"><h2>Labels on every number</h2><div class="list">
-          <div class="item"><span>${badge("official")} Government warnings (NWS)</span></div>
-          <div class="item"><span>${badge("verified")} Live measurements (USGS gauges)</span></div>
-          <div class="item"><span>${badge("forecast")} Weather models (Open-Meteo)</span></div>
-          <div class="item"><span>${badge("experimental")} Float's AI predictions</span></div>
-          <div class="item"><span>${badge("reference")} Maps and places (FEMA, OpenStreetMap)</span></div></div></div>
-        <div class="card"><h2>Flood-risk model ${badge("experimental")}</h2>
-          <p class="small">Trained on <strong>${r.training_rows}</strong> labeled flood photos + a heavy-rain rule. Float shows the higher.</p>
-          <div class="table-wrap"><table><thead><tr><th>Test</th><th>PR-AUC</th><th>Recall</th><th>Precision</th><th>False alarms</th></tr></thead><tbody>
-          ${row("New areas", r.area_holdout.model)}${row("New storm (Hill Country 2025)", r.storm_holdout.model)}${row("100 hand-labeled photos", r.human_labeled_test.model)}</tbody></table></div>
-          <p class="small muted">Weak on floods from upstream rain. Experimental only.</p></div>
-        <div class="card"><h2>Image model ${badge("experimental")}</h2><p><strong>${pct(im.hand_labeled_test.accuracy)}</strong> correct on 100 hand-labeled photos · floods caught ${esc(im.hand_labeled_test.floods_caught)} · false alarms ${esc(im.hand_labeled_test.false_alarms)}</p></div>
-        <div class="card"><h2>Built with</h2><ul class="tight small">
-          <li><strong>${m.sites}</strong> Texas flood photos: 100 labeled by hand, the rest by Qwen3-VL on the GB10</li>
-          <li>GB10 vision: <strong>${m.gb10.enabled ? "connected" : "off"}</strong></li>
-          <li>Map data © OpenStreetMap contributors</li></ul></div>`;
-    } catch (e) { el.innerHTML = `<div class="card"><p class="form-msg err">Could not load: ${esc(e.message)}</p></div>`; }
+      el.innerHTML = `${back}<div><div class="title">About Float</div><p class="sub">Flood safety for Houston, built on the Dell Pro Max GB10.</p></div>
+        <div class="grid"><div class="tile"><div class="k">Image AI</div><div class="big">${pct(im.hand_labeled_test.accuracy)}</div><div class="muted">correct on 100 hand-labeled flood photos</div></div>
+          <div class="tile"><div class="k">Risk AI · new areas</div><div class="big">${pct(r.area_holdout.model.recall)}</div><div class="muted">of floods caught · ${pct(r.area_holdout.model.false_positive_rate)} false alarms</div></div></div>
+        <div class="card"><h2>Sources</h2><div class="rows">
+          <div class="r"><span class="ic">🚨</span><div class="m"><div class="n">Warnings</div><div class="s">National Weather Service</div></div>${badge("official")}</div>
+          <div class="r"><span class="ic">🌧️</span><div class="m"><div class="n">Weather</div><div class="s">Open-Meteo</div></div>${badge("forecast")}</div>
+          <div class="r"><span class="ic">📈</span><div class="m"><div class="n">River gauges</div><div class="s">USGS</div></div>${badge("verified")}</div>
+          <div class="r"><span class="ic">📄</span><div class="m"><div class="n">Flood history</div><div class="s">OpenFEMA claims + disasters, FEMA flood map</div></div>${badge("historical")}</div>
+          <div class="r"><span class="ic">📰</span><div class="m"><div class="n">News</div><div class="s">Google News</div></div>${badge("reference")}</div>
+          <div class="r"><span class="ic">🧠</span><div class="m"><div class="n">Flood prediction</div><div class="s">Trained on ${r.training_rows} labeled flood photos + heavy-rain rule</div></div>${badge("experimental")}</div></div>
+          <p class="small muted">AI predictions are experimental and weak on floods from upstream rain. Always follow official warnings. GB10 vision: ${m.gb10.enabled ? "on" : "off"}.</p></div>`;
+      bindGo(el);
+    } catch (e) { el.innerHTML = `${back}<p class="msg err">${esc(e.message)}</p>`; bindGo(el); }
   }
 
   // ---------- photo dialog ----------
   async function openSite(id) {
     const s = state.sites.find((x) => x.image_id === id);
-    $("#dlg-title").textContent = s ? `${s.locality} · ${s.date}` : id;
-    $("#dlg-body").innerHTML = `<img src="/static/thumbs/${esc(id)}.jpg" alt="Aerial photo">
-      ${s ? `<p><strong>${s.label === "flood" ? "Flooded" : s.label === "not_flood" ? "Dry" : "Unsure"}</strong> · labeled by ${s.labeled_by === "human" ? "a person" : "Qwen on the GB10"}</p>` : ""}
-      <div id="dlg-analysis"><p class="empty">Asking the AI models...</p></div>`;
+    $("#dlg-title").textContent = s ? `${s.locality} · ${s.date}` : "Photo";
+    $("#dlg-body").innerHTML = `<img src="/static/thumbs/${esc(id)}.jpg" alt="Aerial photo"><div id="dlg-analysis"><p class="empty">Asking the AI...</p></div>`;
     if (!$("#site-dialog").open) $("#site-dialog").showModal();
     try {
       const r = await api(`/api/site/${encodeURIComponent(id)}`);
-      const c = r.classifier;
-      $("#dlg-analysis").innerHTML = `<h3>${badge("experimental")} Float image model</h3><p><strong class="${c.label === "flood" ? "lv-HIGH" : "lv-LOW"}">${c.label === "flood" ? "FLOOD" : "NO FLOOD"}</strong> · ${pct(c.flood_probability)}</p>
-        ${r.qwen ? `<h3>${badge("experimental")} Qwen on the GB10</h3><p>${esc(r.qwen.description)}</p>` : r.qwen_error ? `<p class="small muted">GB10 vision off.</p>` : ""}`;
-    } catch (e) { $("#dlg-analysis").innerHTML = `<p class="form-msg err">${esc(e.message)}</p>`; }
+      $("#dlg-analysis").innerHTML = `<p style="font-size:1.2rem;font-weight:900" class="${r.classifier.label === "flood" ? "lv-HIGH" : "lv-LOW"}">${r.classifier.label === "flood" ? "Flooded" : "No flood"} · ${pct(r.classifier.flood_probability)}</p>${r.qwen ? `<p>${esc(r.qwen.description)}</p>` : ""}<p class="prov">${badge("experimental")} Float image AI${r.qwen ? " + Qwen on the GB10" : ""}</p>`;
+    } catch (e) { $("#dlg-analysis").innerHTML = `<p class="msg err">${esc(e.message)}</p>`; }
   }
   $("#dlg-close").addEventListener("click", () => $("#site-dialog").close());
 
-  // ---------- search ----------
-  $("#search-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const q = $("#search-input").value.trim(), box = $("#search-results");
-    if (!q) return;
-    box.hidden = false; box.innerHTML = `<button disabled>Searching...</button>`;
-    try {
-      const { results } = await api(`/api/geocode?q=${encodeURIComponent(q)}`);
-      box.innerHTML = results.length ? results.map((r, i) => `<button data-i="${i}">${esc(r.name)}</button>`).join("") : `<button disabled>No match. Try street + city, or use the Map tab.</button>`;
-      $$("[data-i]", box).forEach((b) => b.addEventListener("click", () => {
-        const r = results[+b.dataset.i];
-        box.hidden = true; $("#search-input").value = "";
-        map.setView([r.lat, r.lon], 13);
-        choosePoint(r.lat, r.lon, r.name.split(",").slice(0, 2).join(","));
-      }));
-    } catch (err) { box.innerHTML = `<button disabled>Search unavailable. Use the Map tab.</button>`; }
-  });
-  document.addEventListener("click", (e) => { if (!e.target.closest("#search-form")) $("#search-results").hidden = true; });
-
-  // ---------- accessibility ----------
-  for (const [id, cls] of [["#btn-large", "large-text"], ["#btn-contrast", "high-contrast"]]) {
-    const on = store.get(cls, false);
-    document.body.classList.toggle(cls, on); $(id).setAttribute("aria-pressed", String(on));
-    $(id).addEventListener("click", () => { const v = !document.body.classList.contains(cls);
-      document.body.classList.toggle(cls, v); $(id).setAttribute("aria-pressed", String(v)); store.set(cls, v); });
-  }
-
   // ---------- start ----------
   async function start() {
+    for (const cls of ["large-text", "high-contrast"]) document.body.classList.toggle(cls, store.get(cls, false));
     const [fromHash, phaseHash] = location.hash.slice(1).split("/");
     if (PHASES.includes(phaseHash)) { state.phase = phaseHash; store.set("phase", phaseHash); store.set("phaseManual", true); }
+    if (!state.phase) state.phase = "before";
     updatePhaseUI();
     setTab(TABS.includes(fromHash) ? fromHash : "home");
-    api("/api/meta").then((m) => {
-      state.meta = m;
-      const p = $("#gb10-pill"); p.className = "pill " + (m.gb10.enabled ? "ok" : "bad");
-      p.textContent = m.gb10.enabled ? "GB10 on" : "GB10 off"; p.title = m.gb10.reason || m.gb10.model;
-    }).catch(() => setOnline(false, store.get("last")));
-    loadEvidence();
-    const last = store.get("last");
-    choosePoint(last ? last.lat : 29.7752, last ? last.lon : -95.6303, last ? last.label : "Addicks / Barker, west Houston");
-    await Promise.allSettled([loadSites(), loadEssentials(), loadGauges(), refreshInbox(), refreshMine()]);
+    api("/api/meta").then((m) => { state.meta = m; }).catch(() => {});
+    if (state.place) { $("#place-name").textContent = placeName(); pin = L.marker([state.place.lat, state.place.lon]).addTo(map); refreshPlace(); }
+    else showWelcome("location");
+    await Promise.allSettled([loadSites(), loadGauges(), refreshInbox(), refreshMine()]);
+    if (state.tab === "home") renderHome();
     setInterval(loadGauges, 5 * 60 * 1000);
     setInterval(refreshInbox, 5 * 60 * 1000);
     setInterval(refreshMine, 2 * 60 * 1000);

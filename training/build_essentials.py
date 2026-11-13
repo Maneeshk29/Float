@@ -1,4 +1,4 @@
-"""Build data/essentials.json: hospitals, shelters, fuel and grocery locations from OpenStreetMap.
+"""Build data/essentials.json: hospitals, pharmacies, shelters, fuel and grocery locations from OpenStreetMap.
 
 Locations only. OpenStreetMap does not say whether a place is open or stocked, so Float shows
 availability as "unknown".
@@ -19,6 +19,7 @@ BBOX = "29.45,-95.95,30.20,-94.85"   # Greater Houston / Harris County pilot are
 QUERY = f"""[out:json][timeout:180];(
 nwr["amenity"="hospital"]({BBOX});
 nwr["amenity"="fuel"]({BBOX});
+nwr["amenity"="pharmacy"]({BBOX});
 nwr["shop"="supermarket"]({BBOX});
 nwr["social_facility"="shelter"]({BBOX});
 nwr["emergency"="assembly_point"]({BBOX});
@@ -48,6 +49,8 @@ def category(tags):
         return "hospital"
     if tags.get("amenity") == "fuel":
         return "fuel"
+    if tags.get("amenity") == "pharmacy":
+        return "pharmacy"
     if tags.get("shop") == "supermarket":
         return "grocery"
     return "shelter"

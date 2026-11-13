@@ -15,7 +15,9 @@ from . import live, models
 from .config import STATE
 LEVELS = ["LOW", "MODERATE", "HIGH", "VERY HIGH"]
 FLOOD_ALERT_WORDS = ("flood", "hurricane", "tropical storm", "storm surge")
-MAX_RECORDS = {"subscriptions": 5000, "offers": 1000, "requests": 5000, "notifications": 50000}
+MAX_RECORDS = {"subscriptions": 5000, "offers": 2000, "requests": 5000, "notifications": 50000, "profiles": 10000}
+KINDS = ("shelter", "ride")
+ROLES = ("need_shelter", "offer_shelter", "need_ride", "offer_ride", "need_help", "informed")
 _lock = threading.RLock()
 
 
@@ -200,7 +202,7 @@ def _spots_left(offer, requests):
 
 
 def _public_offer(o, requests, lat=None, lon=None):
-    out = {"id": o["id"], "area": o["area"], "spots_left": _spots_left(o, requests), "spots": o["spots"],
+    out = {"id": o["id"], "kind": o.get("kind", "shelter"), "area": o["area"], "spots_left": _spots_left(o, requests), "spots": o["spots"],
            "pets": o["pets"], "accessible": o["accessible"], "available_from": o["available_from"],
            "available_to": o["available_to"], "note": o["note"], "created": o["created"],
            "lat": round(o["lat"], 2), "lon": round(o["lon"], 2)}   # about 1 km: no exact address
@@ -211,7 +213,10 @@ def _public_offer(o, requests, lat=None, lon=None):
 
 def create_offer(body):
     lat, lon = coord(body.get("lat"), body.get("lon"))
-    offer = {"id": _new_id(), "token": secrets.token_urlsafe(16), "lat": lat, "lon": lon,
+    kind = body.get("kind", "shelter")
+    if kind not in KINDS:
+        raise ValueError("Unknown offer type.")
+    offer = {"id": _new_id(), "token": secrets.token_urlsafe(16), "kind": kind, "lat": lat, "lon": lon,
              "area": text(body.get("area"), 80, True), "spots": integer(body.get("spots"), 1, 50),
              "pets": bool(body.get("pets")), "accessible": bool(body.get("accessible")),
              "available_from": text(body.get("available_from"), 10), "available_to": text(body.get("available_to"), 10),
@@ -234,11 +239,11 @@ def close_offer(body):
     return {"ok": True}
 
 
-def find_offers(lat, lon, people=1, pets=False, accessible=False, radius_km=80):
+def find_offers(lat, lon, people=1, pets=False, accessible=False, radius_km=80, kind="shelter"):
     requests = _load("requests")
     out = []
     for o in _load("offers").values():
-        if not o["active"]:
+        if not o["active"] or o.get("kind", "shelter") != kind:
             continue
         p = _public_offer(o, requests, lat, lon)
         if p["km"] > radius_km or p["spots_left"] < people or (pets and not o["pets"]) or (accessible and not o["accessible"]):
@@ -309,9 +314,42 @@ def mine(body):
         if not r or not secrets.compare_digest(r["token"], str(item.get("token", ""))):
             continue
         o = offers.get(r["offer_id"], {})
-        entry = {k: r[k] for k in ("id", "people", "status", "created")}
+        entry = {k: r[k] for k in ("id", "offer_id", "people", "status", "created")}
         entry["area"] = o.get("area", "")
+        entry["kind"] = o.get("kind", "shelter")
         if r["status"] == "accepted":
             entry["host_name"], entry["host_contact"] = o.get("name"), o.get("contact")
         my_requests.append(entry)
     return {"offers": my_offers, "requests": my_requests}
+
+
+# --- profiles ------------------------------------------------------------------------------------
+def save_profile(body):
+    role = body.get("role", "informed")
+    if role not in ROLES:
+        raise ValueError("Unknown role.")
+    fields = {"role": role, "name": text(body.get("name"), 60), "contact": text(body.get("contact"), 120),
+              "people": integer(body.get("people", 1), 1, 50), "pets": bool(body.get("pets")),
+              "accessible": bool(body.get("accessible")), "has_car": bool(body.get("has_car", True)),
+              "medical": text(body.get("medical"), 200), "updated": now_iso()}
+    if body.get("lat") is not None and body.get("lon") is not None:
+        lat, lon = coord(body["lat"], body["lon"])
+        fields.update({"lat": round(lat, 4), "lon": round(lon, 4), "label": text(body.get("label"), 120)})
+    with _lock:
+        profiles = _load("profiles")
+        if body.get("id"):
+            _check(profiles.get(body["id"]), body.get("token"))
+            profiles[body["id"]].update(fields)
+            prof = profiles[body["id"]]
+        else:
+            _room("profiles", profiles)
+            prof = {"id": _new_id(), "token": secrets.token_urlsafe(16), "created": now_iso(), **fields}
+            profiles[prof["id"]] = prof
+        _save("profiles", profiles)
+    return prof
+
+
+def get_profile(body):
+    prof = _load("profiles").get(body.get("id"))
+    _check(prof, body.get("token"))
+    return prof

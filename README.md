@@ -40,50 +40,60 @@ Without the key everything else still works; the header shows "GB10 off". Other 
 
 ## What it does
 
-One tab is visible at a time. A **Before / During / After** switch above the tabs changes what every tab
-shows. Float picks **During** automatically when there is an NWS flood alert or high risk; tap a phase to
-override. Links can open a tab and phase directly, e.g. `/#shelter/during`.
+**1. Asks where you are.** On first open, Float asks for your location ("Use my location", or type an address),
+then why you're here: *I need a place to stay · I need a ride out · I need other help · I can host people ·
+I can give rides · Just keeping informed*.
 
-| Tab | Before | During | After |
-|---|---|---|---|
-| **Home** | Risk now, 7-day bars, "Get ready" actions, past floods nearby | "Stay safe" actions, official alert banner | "Can I return?" checks, "Recover" actions |
-| **Outlook** | 7-day daily risk first, then next 24 h | Next 24 h first | Next 24 h first |
-| **Alerts** | Turn on alerts for your place, your places, inbox | same | same |
-| **Shelter** | Plan where you'd go | Need shelter now? | Place to stay |
-| **Guides** | Kit, plan, protect home, know your risk | Evacuate, water and roads, power and gas | Return, clean up, claims, help |
-| **Recovery** | Photograph your home now | Safety first | Document damage + FEMA/NFIP help |
-| **Map** | Past floods, live gauges, hospitals, shelter hosts, FEMA zones | same | same |
-| **Manager** | Areas ranked by flooding, vulnerability and hospital access | same | same |
-| **About** | Data labels, model results | same | same |
+**2. Checks your spot** against live and historical sources:
 
-### Week-ahead flood alerts
+| What | Source |
+|---|---|
+| Official warnings | National Weather Service |
+| 8-day weather | Open-Meteo |
+| Flood history | OpenFEMA flood-insurance claims for your ZIP, federal flood disasters for your county, FEMA flood zone, labeled Harvey imagery nearby |
+| Local flood news | Google News (city, falling back to county) |
+| Flood prediction | Float's risk model on the 8-day rain forecast |
 
-- Anyone can turn on alerts for a place and pick a level ("High risk" or "Moderate or higher").
-- Every `ALERT_CHECK_HOURS`, the server re-runs the 7-day outlook for each place (rain forecast 8 days
-  out) and sends one alert for the earliest day that reaches the level, e.g.
-  **"VERY HIGH flood risk in 5 days · Wed Nov 18 · 95% · 180 mm rain forecast"**.
-- NWS flood, hurricane and storm-surge alerts for the place are passed on, marked **OFFICIAL**.
-- Alerts show in the Alerts inbox (with a count on the tab) and as browser pop-ups while Float is open.
-- No duplicates: each alert is sent once.
+**3. Gives one verdict** for the next 7 days: **No flooding expected**, **Flooding possible** or
+**Heavy flooding likely**, with the peak day and the reasons. An NWS flood/hurricane warning, a HIGH forecast,
+or a MODERATE forecast in a place with a high flood history all count as heavy.
 
-### Shelter matching
+**4. Connects people to help.** When flooding is heavy, or the profile says *I need a place to stay / a ride /
+other help*, Home shows **Get to safety**:
+- 911, 2-1-1 (official shelters and Texas STEAR evacuation rides), Red Cross, 3-1-1;
+- nearby hosts and volunteer drivers that fit the household (people, pets, wheelchair), each one tap to
+  request using the profile's name and phone;
+- nearest public shelters, plus the Red Cross live list.
 
-- **Offer a place:** area name, spots, pets ok, wheelchair access, dates, contact. Others see only an
-  area about 1 km wide, never the exact location or contact.
-- **Find a host:** hosts within 80 km with enough spots, filtered by pets and wheelchair access, nearest
-  first. "Ask to stay" sends a request.
-- **My matches:** hosts accept or decline requests. Contacts are shared with both sides only after the host
-  accepts. Spots are counted so a place can't be overbooked.
-- Official shelters (Red Cross, 2-1-1, FEMA housing) are always shown first. Hosts are not vetted, and the
-  app says so.
-- There are no accounts: each offer, request or alert gets a secret token kept in that browser.
+Hosts and drivers accept or decline. Contacts are shared with both sides only after acceptance, and
+exact locations are never shown (only a ~1 km area).
 
-### Everything else
+**Always available, whatever the risk:** nearest hospitals, pharmacies, grocery stores, fuel and shelters
+(list or map, with directions).
 
-- Live NWS alerts, USGS gauges, Open-Meteo rain and FEMA zones, each labeled with its source and age.
-- Damage photos: fingerprinted (SHA-256), time-stamped, classified by the Float image model and described
-  by Qwen on the GB10; printable claim packet.
-- Offline: shows the last update with an "OFFLINE" banner. Large-text and high-contrast modes.
+### Tabs
+
+| Tab | What's there |
+|---|---|
+| **Home** | Verdict, Get to safety (when needed), weather strip, tiles: flood history, closest places, news, your plan, guide, alerts |
+| **Nearby** | Hospitals · Pharmacies · Grocery · Fuel · Shelters, list or map |
+| **Help** | Stay / Ride / Matches: find or offer a place or a ride, accept requests |
+| **Alerts** | One switch: warnings up to 7 days ahead for your place; inbox |
+| **Guides** | Before / During / After checklists; damage photos for claims |
+| **Me** | Profile (role, household, needs, contact) and settings; manager view and About |
+
+The **Before / During / After** switch changes Home and Guides; Float picks *During* automatically when
+flooding is likely. Week-ahead alerts re-check every `ALERT_CHECK_HOURS` and send one alert for the earliest
+day that reaches the chosen level, plus official NWS flood alerts. Big text, high contrast and offline mode
+are built in.
+
+### Tests
+
+```sh
+python tests/community_test.py http://localhost:8080     # alerts + shelter/ride API
+node tests/ui_flow_test.mjs http://localhost:8080        # full browser flow (needs Chrome, Node 22+)
+```
+Run them against a server started with `FLOAT_STATE_DIR=/tmp/float_test_state` so test data stays separate.
 
 ## The models
 
@@ -171,7 +181,8 @@ python training/train_image_model.py
 floatapp/server.py     web server and API
 floatapp/live.py       NWS, USGS, Open-Meteo, FEMA, geocoding (with provenance on every result)
 floatapp/models.py     risk timeline, 7-day outlook, image classifier, Qwen on the GB10
-floatapp/community.py  week-ahead alerts and shelter matching (stored in state/)
+floatapp/community.py  week-ahead alerts, profiles, shelter and ride matching (stored in state/)
+floatapp/check.py      place, weather, flood history, news and the impact verdict
 static/               front end (index.html, app.js, style.css, Leaflet, thumbnails)
 training/             scripts that build the data files and train the models
 models/               trained models and their validation metrics
@@ -191,6 +202,8 @@ models/               trained models and their validation metrics
   Outlook tab says so.
 - **Alerts reach people only in the app and as browser pop-ups while Float is open.** No SMS, email or
   phone push yet.
-- **Shelter hosts are not vetted.** Official shelters are listed first.
+- **Hosts and drivers are not vetted.** Official shelters and 2-1-1 are always listed first.
+- **Flood history uses ZIP and county records.** A ZIP with many claims can still have dry streets.
+- **Places list covers Greater Houston.** Elsewhere, Nearby says so.
 - **Shelter and alert records live on the Float server** in `state/`. Back up or clear that folder as needed;
   there are no accounts.
