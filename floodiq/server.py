@@ -280,7 +280,7 @@ def main():
     status = models.vlm_status()
     print(f"\n  Flood IQ is running:  http://localhost:{PORT}")
     print(f"  GB10 vision model ({VLM_MODEL}): {'on' if status['enabled'] else 'off - ' + str(status['reason'])}")
-    print("  Press Ctrl+C to stop.\n")
+    print("  Press Ctrl+C to stop.\n", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
