@@ -19,7 +19,7 @@ import pandas as pd
 from PIL import Image
 
 from . import check, community, live, models, roads
-from .config import ALERT_CHECK_HOURS, DATA, EVIDENCE, HOST, MODELS, PORT, STATIC, VLM_MODEL
+from .config import ALERT_CHECK_HOURS, DATA, EVIDENCE, HOST, MODELS, PORT, SERVERLESS, STATIC, VLM_MODEL
 
 def records(frame):
     """DataFrame -> list of dicts with NaN turned into None (valid JSON)."""
@@ -34,7 +34,7 @@ METRICS = {name: json.loads((MODELS / f"{name}_metrics.json").read_text())
            for name in ("risk_model", "image_model") if (MODELS / f"{name}_metrics.json").exists()}
 POOL = ThreadPoolExecutor(8)
 evidence_lock = threading.Lock()
-MAX_UPLOAD = 15 * 1024 * 1024
+MAX_UPLOAD = (4 if SERVERLESS else 15) * 1024 * 1024     # Vercel caps request bodies at 4.5 MB
 
 
 def km(lat1, lon1, lat2, lon2):
@@ -159,12 +159,12 @@ def priorities():
 def decode_image(data_url):
     raw = base64.b64decode(data_url.split(",", 1)[-1])
     if len(raw) > MAX_UPLOAD:
-        raise ValueError("Image is larger than 15 MB.")
+        raise ValueError(f"Image is larger than {MAX_UPLOAD // 1048576} MB.")
     return raw, Image.open(io.BytesIO(raw))
 
 
 def analyze(img, use_qwen=True):
-    out = {"classifier": models.classify_image(img)}
+    out = {"classifier": models.classify_image(img)}      # None when the image AI isn't installed
     if use_qwen:
         try:
             out["qwen"] = models.ask_qwen(img)
@@ -182,7 +182,7 @@ def save_evidence(body):
               "captured_at": live.now_iso(), "lat": num(body.get("lat")), "lon": num(body.get("lon")),
               "note": str(body.get("note", ""))[:1000], "analysis": result}
     with evidence_lock:
-        EVIDENCE.mkdir(exist_ok=True)
+        EVIDENCE.mkdir(parents=True, exist_ok=True)
         (EVIDENCE / record["file"]).write_bytes(raw)
         (EVIDENCE / f"{record['id']}.json").write_text(json.dumps(record, indent=1))
     return record
@@ -231,7 +231,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.static_file(EVIDENCE, path[len("/evidence/"):])
             if path == "/api/meta":
                 return self.send(200, {"metrics": METRICS, "gb10": models.vlm_status(),
-                                       "risk_model": models.risk_bundle()["version"],
+                                       "risk_model": models.risk_bundle()["version"], "image_ai": models.image_ai_available(),
+                                       "hosting": "serverless" if SERVERLESS else "server",
                                        "essentials": {k: ESSENTIALS[k] for k in ("source", "osm_snapshot", "retrieved_at")},
                                        "sites": len(ALL_SITES), "server_time": live.now_iso()})
             if path == "/api/sites":
@@ -291,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > MAX_UPLOAD * 1.4:
-                return self.send(413, {"error": "Upload too large (15 MB max)."})
+                return self.send(413, {"error": f"Upload too large ({MAX_UPLOAD // 1048576} MB max)."})
             body = json.loads(self.rfile.read(length) or b"{}")
             if path == "/api/analyze":
                 _, img = decode_image(body["image"])
@@ -299,7 +300,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/evidence":
                 return self.send(200, save_evidence(body))
             actions = {"/api/alerts/subscribe": community.subscribe, "/api/alerts/unsubscribe": community.unsubscribe,
-                       "/api/alerts/inbox": community.inbox, "/api/shelter/offer": community.create_offer,
+                       "/api/alerts/inbox": lambda b: community.inbox(b, ALERT_CHECK_HOURS if SERVERLESS else None),
+                       "/api/shelter/offer": community.create_offer,
                        "/api/shelter/close": community.close_offer, "/api/shelter/request": community.create_request,
                        "/api/shelter/respond": community.respond, "/api/shelter/mine": community.mine,
                        "/api/profile/save": community.save_profile, "/api/profile/get": community.get_profile}

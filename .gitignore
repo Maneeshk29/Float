@@ -5,3 +5,5 @@ evidence/
 .DS_Store
 flood_data/
 state/
+.vercel
+.env*

@@ -5,8 +5,7 @@ import json
 import threading
 import urllib.request
 
-import joblib
-import pandas as pd
+import math
 
 from .config import MODELS, VLM_KEY, VLM_MODEL, VLM_URL
 
@@ -17,11 +16,31 @@ _image = None
 
 
 def risk_bundle():
+    """The trained gradient-boosted risk model, exported to plain JSON trees (training/export_risk_model.py)."""
     global _risk
     with _lock:
         if _risk is None:
-            _risk = joblib.load(MODELS / "risk_model.joblib")
+            _risk = json.loads((MODELS / "risk_model.json").read_text())
     return _risk
+
+
+def predict_risk(bundle, rows):
+    """Flood probability for each feature row (same result as scikit-learn's predict_proba)."""
+    out = []
+    for x in rows:
+        raw = bundle["baseline"]
+        for t in bundle["trees"]:
+            node = 0
+            while not t["leaf"][node]:
+                v = x[t["feature"][node]]
+                if v is None or (isinstance(v, float) and math.isnan(v)):
+                    go_left = t["missing_left"][node]
+                else:
+                    go_left = v <= t["threshold"][node]
+                node = t["left"][node] if go_left else t["right"][node]
+            raw += t["value"][node]
+        out.append(1.0 / (1.0 + math.exp(-raw)))
+    return out
 
 
 def level(p):
@@ -51,7 +70,7 @@ def score_hours(rain, elevation_m, fema_sfha, offsets):
                      "elevation_m": elevation_m, "fema_sfha": None if fema_sfha is None else int(fema_sfha)})
         details.append({"forecast_rain_mm": round(sum(hourly[now + 1:end]), 1) if h else 0.0,
                         "rain_6h_mm": window(6)})
-    probs = bundle["model"].predict_proba(pd.DataFrame(rows)[bundle["features"]].astype(float))[:, 1]
+    probs = predict_risk(bundle, [[None if r[f] is None else float(r[f]) for f in bundle["features"]] for r in rows])
     out = []
     for h, p_ml, feats, d in zip(offsets, probs, rows, details):
         p_rule = rule_probability(d["rain_6h_mm"], feats["rain_1d_mm"], feats["rain_3d_mm"], fema_sfha)
@@ -134,7 +153,19 @@ def image_model():
     return _image
 
 
+def image_ai_available():
+    """The image classifier needs PyTorch (installed by run.sh; too large for serverless hosting)."""
+    try:
+        import torch  # noqa: F401
+        import torchvision  # noqa: F401
+    except ImportError:
+        return False
+    return (MODELS / "image_model.pt").exists()
+
+
 def classify_image(pil_image):
+    if not image_ai_available():
+        return None
     net, tf, torch = image_model()
     with torch.no_grad():
         p = torch.softmax(net(tf(pil_image.convert("RGB")).unsqueeze(0)), 1)[0, 1].item()

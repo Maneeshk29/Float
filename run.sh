@@ -15,5 +15,6 @@ if [ ! -x .venv/bin/python ]; then
   "$PY" -m venv .venv
   .venv/bin/python -m pip install --quiet --upgrade pip
   .venv/bin/python -m pip install --quiet -r requirements.txt
+  .venv/bin/python -m pip install --quiet -r requirements-ml.txt || echo "Photo AI packages failed to install; Float runs without the image classifier."
 fi
 exec .venv/bin/python -m floatapp.server

@@ -1,0 +1,11 @@
+.venv
+state
+evidence
+flood_data
+tests
+training
+scripts
+models/*.pt
+models/*.joblib
+labels/human_labels_*.csv
+static/logo.png

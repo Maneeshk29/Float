@@ -739,10 +739,18 @@
           <label class="field">Note<input id="ev-note" maxlength="300" placeholder="Room, item, water line"></label>
           <div class="row2"><button class="btn" type="submit" id="ev-submit">Save photo</button><button class="btn ghost" type="button" id="ev-print">Print for insurance</button></div></form>
         ${state.evidence.length ? `<div style="margin-top:8px">${state.evidence.map((r) => `<div class="evidence-rec"><img src="/evidence/${esc(r.file)}" alt="">
-          <div class="small"><strong>${esc(clock(r.captured_at))}</strong>${r.note ? " · " + esc(r.note) : ""}<br>AI: ${r.analysis.classifier.label === "flood" ? "flood damage" : "no flood"} (${pct(r.analysis.classifier.flood_probability)})<br>
+          <div class="small"><strong>${esc(clock(r.captured_at))}</strong>${r.note ? " · " + esc(r.note) : ""}<br>${r.analysis.classifier ? `AI: ${r.analysis.classifier.label === "flood" ? "flood damage" : "no flood"} (${pct(r.analysis.classifier.flood_probability)})<br>` : ""}
           ${r.analysis.qwen ? esc(r.analysis.qwen.description) + "<br>" : ""}<span class="mono">SHA-256 ${esc(r.sha256.slice(0, 32))}…</span></div></div>`).join("")}</div>` : ""}</div>` : ""}`;
     if (!photo) return;
-    const readFile = (f) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsDataURL(f); });
+    // Shrink photos in the browser (max 1600 px JPEG) so uploads stay small and fast
+    const readFile = (f) => new Promise((ok, fail) => {
+      const url = URL.createObjectURL(f), img = new Image();
+      img.onload = () => { const k = Math.min(1, 1600 / Math.max(img.width, img.height)), c = document.createElement("canvas");
+        c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url); ok(c.toDataURL("image/jpeg", 0.85)); };
+      img.onerror = () => { URL.revokeObjectURL(url); fail(new Error("Couldn't read that photo")); };
+      img.src = url;
+    });
     $("#ev-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const file = $("#ev-file").files[0]; if (!file) return;
@@ -832,7 +840,7 @@
       const m = state.meta || (state.meta = await api("/api/meta"));
       const r = m.metrics.risk_model, im = m.metrics.image_model;
       el.innerHTML = `${back}<div><div class="title">About Float</div><p class="sub">Flood safety for Houston, built on the Dell Pro Max GB10.</p></div>
-        <div class="grid"><div class="tile"><div class="k">Image AI</div><div class="big">${pct(im.hand_labeled_test.accuracy)}</div><div class="muted">correct on 100 hand-labeled flood photos</div></div>
+        <div class="grid"><div class="tile"><div class="k">Image AI</div><div class="big">${pct(im.hand_labeled_test.accuracy)}</div><div class="muted">correct on ${im.hand_labeled_test.n} hand-labeled flood photos</div></div>
           <div class="tile"><div class="k">Risk AI · new areas</div><div class="big">${pct(r.area_holdout.model.recall)}</div><div class="muted">of floods caught · ${pct(r.area_holdout.model.false_positive_rate)} false alarms</div></div></div>
         <div class="card"><h2>Sources</h2><div class="rows">
           <div class="r"><span class="ic">🚨</span><div class="m"><div class="n">Warnings</div><div class="s">National Weather Service</div></div>${badge("official")}</div>
@@ -854,7 +862,9 @@
     if (!$("#site-dialog").open) $("#site-dialog").showModal();
     try {
       const r = await api(`/api/site/${encodeURIComponent(id)}`);
-      $("#dlg-analysis").innerHTML = `<p style="font-size:1.2rem;font-weight:900" class="${r.classifier.label === "flood" ? "lv-HIGH" : "lv-LOW"}">${r.classifier.label === "flood" ? "Flooded" : "No flood"} · ${pct(r.classifier.flood_probability)}</p>${r.qwen ? `<p>${esc(r.qwen.description)}</p>` : ""}<p class="prov">${badge("experimental")} Float image AI${r.qwen ? " + Qwen on the GB10" : ""}</p>`;
+      const c = r.classifier;
+      $("#dlg-analysis").innerHTML = (c ? `<p style="font-size:1.2rem;font-weight:900" class="${c.label === "flood" ? "lv-HIGH" : "lv-LOW"}">${c.label === "flood" ? "Flooded" : "No flood"} · ${pct(c.flood_probability)}</p>` : `<p class="muted small">Photo AI runs on the full Float server (not on this host).</p>`)
+        + `${r.qwen ? `<p>${esc(r.qwen.description)}</p>` : ""}${c || r.qwen ? `<p class="prov">${badge("experimental")} ${c ? "Float image AI" : ""}${c && r.qwen ? " + " : ""}${r.qwen ? "Qwen on the GB10" : ""}</p>` : ""}`;
     } catch (e) { $("#dlg-analysis").innerHTML = `<p class="msg err">${esc(e.message)}</p>`; }
   }
   $("#dlg-close").addEventListener("click", () => $("#site-dialog").close());

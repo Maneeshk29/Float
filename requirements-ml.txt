@@ -1,0 +1,5 @@
+# Optional: the photo flood classifier and model training (installed by run.sh; too large for Vercel)
+torch>=2.4
+torchvision>=0.19
+scikit-learn==1.9.1   # must match the version that saved models/risk_model.joblib (training only)
+joblib>=1.4

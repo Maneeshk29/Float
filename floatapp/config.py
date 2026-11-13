@@ -6,8 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 MODELS = ROOT / "models"
 STATIC = ROOT / "static"
-EVIDENCE = ROOT / "evidence"          # recovery photos and their records (kept on this machine)
-STATE = Path(os.environ.get("FLOAT_STATE_DIR", ROOT / "state"))   # alerts and shelter matches
+# On Vercel (and other serverless hosts) only /tmp is writable, and it is wiped when the instance restarts.
+SERVERLESS = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+_default_writable = Path("/tmp/float") if SERVERLESS else ROOT
+EVIDENCE = Path(os.environ.get("FLOAT_EVIDENCE_DIR", _default_writable / "evidence"))   # recovery photos
+STATE = Path(os.environ.get("FLOAT_STATE_DIR", _default_writable / "state"))   # profiles, alerts, shelter matches
 
 PORT = int(os.environ.get("PORT", "8080"))
 HOST = os.environ.get("HOST", "127.0.0.1")

@@ -23,6 +23,7 @@ Every piece of information is labeled with where it came from and how fresh it i
 git clone https://github.com/Maneeshk29/Float.git
 cd Float
 bash run.sh                       # first run installs packages into .venv (a few minutes)
+# requirements.txt = what Float needs; requirements-ml.txt = photo AI + training (PyTorch)
 ```
 
 Open **http://localhost:8080**. Needs Python 3.11+ and an internet connection for the live feeds.
@@ -37,6 +38,24 @@ GB10_URL=http://HOST/v1 GB10_API_KEY=... bash run.sh
 Without the key everything else still works; the header shows "GB10 off". Other settings:
 `PORT` (default 8080), `HOST` (default 127.0.0.1; use 0.0.0.0 to share on your network), `GB10_MODEL`,
 `ALERT_CHECK_HOURS` (default 3), `FLOAT_STATE_DIR` (where alerts and shelter matches are stored; default `state/`).
+
+## Deploy on Vercel
+
+```sh
+npx vercel login
+npx vercel deploy --prod
+```
+
+`vercel.json` routes every request to `api/index.py` (Float's server as a Vercel Python function); `/static/*`
+is served from Vercel's CDN. On Vercel:
+
+- **Works:** location, flood check (weather, history, news, verdict), 7-day risk, alerts, profiles,
+  shelter and ride matching, Nearby map, road closures and best routes.
+- **Off:** the photo classifier (PyTorch is too large for Vercel functions) and Qwen on the GB10 (private
+  network). Run `bash run.sh` on a machine with the GB10 for those.
+- **Temporary storage:** profiles, alerts, shelter matches and photos live in `/tmp` and reset when Vercel
+  recycles the function. Add a database (for example Upstash Redis or Supabase) for permanent storage.
+- **Alerts** are re-checked when someone opens their inbox (no background thread on serverless).
 
 ## What it does
 

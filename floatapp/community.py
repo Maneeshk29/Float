@@ -28,7 +28,7 @@ def _load(name):
 
 
 def _save(name, data):
-    STATE.mkdir(exist_ok=True)
+    STATE.mkdir(parents=True, exist_ok=True)
     tmp = STATE / f"{name}.json.tmp"
     tmp.write_text(json.dumps(data, indent=1))
     tmp.replace(STATE / f"{name}.json")
@@ -167,7 +167,24 @@ def check_subscription(sub_id):
     return created
 
 
-def inbox(body):
+def _stale(sub, hours):
+    if not sub.get("last_checked"):
+        return True
+    age = datetime.now(timezone.utc) - datetime.strptime(sub["last_checked"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return age.total_seconds() > hours * 3600
+
+
+def inbox(body, recheck_hours=None):
+    """Alerts for the caller's places. With recheck_hours, places not checked recently are re-checked
+    first (used on serverless hosts, where there is no background checker)."""
+    if recheck_hours:
+        subs = _load("subscriptions")
+        stale = [i["id"] for i in body.get("subs", [])[:50] if i.get("id") in subs and _stale(subs[i["id"]], recheck_hours)]
+        for sub_id in stale[:2]:
+            try:
+                check_subscription(sub_id)
+            except Exception as e:
+                print(f"alert check failed for {sub_id}: {e}", flush=True)
     mine = {}
     subs = _load("subscriptions")
     for item in body.get("subs", [])[:50]:

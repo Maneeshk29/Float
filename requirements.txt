@@ -1,8 +1,4 @@
-# Python 3.11 or newer
+# Python 3.11 or newer. These are enough to run Float (also what Vercel installs).
 numpy>=2.0
 pandas>=2.2
-scikit-learn==1.9.1   # must match the version that saved models/risk_model.joblib
-joblib>=1.4
 pillow>=10
-torch>=2.4
-torchvision>=0.19
