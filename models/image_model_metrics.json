@@ -1,0 +1,17 @@
+{
+  "architecture": "ResNet-18 (ImageNet) fine-tuned",
+  "epochs": 6,
+  "hand_labeled_test": {
+    "n": 100,
+    "accuracy": 0.97,
+    "floods_caught": "47/50",
+    "false_alarms": "0/50"
+  },
+  "hand_labeled_test_noaa_only": {
+    "n": 50,
+    "accuracy": 0.94,
+    "floods_caught": "47/50",
+    "false_alarms": "0/0"
+  },
+  "training_images": 1194
+}

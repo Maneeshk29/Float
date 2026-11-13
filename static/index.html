@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flood IQ</title>
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="brand-mark" aria-hidden="true">IQ</span>Flood IQ
+    <span class="tagline">Know what is coming, what is failing, where you can go, and what to do next.</span></div>
+  <form class="search" id="search-form" role="search">
+    <label for="search-input" class="sr-only">Search a Houston address</label>
+    <input id="search-input" type="search" placeholder="Search a Houston address, or click the map" autocomplete="off">
+    <button type="submit">Go</button>
+    <div id="search-results" hidden></div>
+  </form>
+  <nav class="modes" aria-label="Mode">
+    <button data-mode="before" aria-pressed="false">Before</button>
+    <button data-mode="during" aria-pressed="true">During</button>
+    <button data-mode="after" aria-pressed="false">After</button>
+    <button data-mode="manager" aria-pressed="false">Manager</button>
+    <button data-mode="about" aria-pressed="false">Model &amp; data</button>
+  </nav>
+  <div class="status-row">
+    <span class="pill" id="net-pill">Checking connection</span>
+    <span class="pill" id="gb10-pill">GB10: checking</span>
+    <span class="access">
+      <button id="btn-large" aria-pressed="false" title="Larger text">A+</button>
+      <button id="btn-contrast" aria-pressed="false" title="High contrast">Contrast</button>
+    </span>
+  </div>
+</header>
+<div id="offline-banner" role="alert" hidden></div>
+
+<main id="main-view" class="layout">
+  <section id="map-wrap" aria-label="Map"><div id="map"></div></section>
+
+  <aside id="panel" aria-live="polite">
+    <section class="card">
+      <div class="where" id="where">Pick a place: search an address or click the map.</div>
+      <div class="small muted" id="where-sub">Pilot area: Houston and Harris County, Texas.</div>
+    </section>
+
+    <section class="card" id="official-card">
+      <h2>Official alerts <span class="badge official">Official</span></h2>
+      <div id="alerts"><p class="empty">Choose a location to check National Weather Service alerts.</p></div>
+    </section>
+
+    <section class="card" id="risk-card">
+      <h2>Flood IQ risk timeline <span class="badge experimental">Experimental AI forecast</span></h2>
+      <div id="risk"><p class="empty">Choose a location to see the next 24 hours.</p></div>
+      <p class="disclaimer">Experimental prediction, not an official warning. Always follow NWS and local officials.</p>
+    </section>
+
+    <section class="card" id="conditions-card">
+      <h2>Conditions</h2>
+      <div id="conditions"><p class="empty">Rainfall, nearby river gauges and FEMA flood zone appear here.</p></div>
+    </section>
+
+    <!-- BEFORE -->
+    <section class="card mode-before" hidden>
+      <h2>Prepare</h2>
+      <div class="checklist" id="prep-list"></div>
+      <p class="small muted">Saved on this device only.</p>
+    </section>
+
+    <!-- DURING -->
+    <section class="card mode-during mode-before" id="essentials-card">
+      <h2>Essentials nearby <span class="badge reference">Reference</span></h2>
+      <div id="essentials"><p class="empty">Hospitals, grocery stores and fuel stations near the chosen place.</p></div>
+    </section>
+    <section class="card mode-during">
+      <h2>Safety</h2>
+      <div class="callout danger"><strong>Turn around, don't drown.</strong> Never drive or walk into flood water. 15 cm (6 in) of moving water can knock you down; 30 cm (1 ft) can sweep a car away.</div>
+      <details class="callout"><summary><strong>Smell gas?</strong></summary>
+        <p>Leave immediately on foot. Do not use phones, light switches, vehicles or anything that could make a spark. From a safe distance, call CenterPoint Energy at 1-888-876-5786 and 911.</p>
+        <p class="small muted">Flood IQ has no live gas-leak feed. Source: CenterPoint Energy safety guidance.</p></details>
+      <details class="callout"><summary><strong>Power outage</strong></summary>
+        <p>No open outage feed is connected. Check the <a href="https://tracker.centerpointenergy.com/" target="_blank" rel="noopener">CenterPoint outage tracker</a> (updates about every 5 minutes). Stay 10 m (35 ft) from downed lines.</p></details>
+      <details class="callout"><summary><strong>Shelters</strong></summary>
+        <p>Open shelters change hour by hour. Use the <a href="https://www.redcross.org/get-help/disaster-relief-and-recovery-services/find-an-open-shelter.html" target="_blank" rel="noopener">American Red Cross shelter finder</a> or call 1-800-RED-CROSS, or dial 2-1-1 (United Way Greater Houston).</p></details>
+    </section>
+
+    <!-- AFTER -->
+    <section class="card mode-after" hidden>
+      <h2>Can I return?</h2>
+      <div id="return-check"><p class="empty">Choose a location to check.</p></div>
+    </section>
+    <section class="card mode-after" id="recovery-card" hidden>
+      <h2>Recovery evidence <span class="badge experimental">AI-assisted</span></h2>
+      <p class="small">Photograph damage before cleaning up. Each photo is fingerprinted (SHA-256), time-stamped and described by the Flood IQ image model and Qwen on the GB10. Photos stay on this Flood IQ server.</p>
+      <form id="evidence-form" class="no-print">
+        <div class="form-row"><label for="ev-file">Photo</label><input id="ev-file" type="file" accept="image/*" capture="environment" required></div>
+        <div class="form-row"><label for="ev-note">Note (room, item, water line height...)</label><textarea id="ev-note" rows="2"></textarea></div>
+        <label class="small"><input type="checkbox" id="ev-loc" checked> Attach the chosen map location</label>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap">
+          <button class="btn" type="submit" id="ev-submit">Analyze and save</button>
+          <button class="btn ghost" type="button" id="ev-print">Print claim packet</button>
+        </div>
+      </form>
+      <div id="evidence-list"></div>
+      <h3>Get help</h3>
+      <ul class="small">
+        <li><a href="https://www.disasterassistance.gov/" target="_blank" rel="noopener">DisasterAssistance.gov</a> (FEMA individual assistance, 1-800-621-3362)</li>
+        <li><a href="https://www.fema.gov/disaster/declarations" target="_blank" rel="noopener">FEMA disaster declarations</a></li>
+        <li><a href="https://www.floodsmart.gov/" target="_blank" rel="noopener">NFIP: start a flood insurance claim</a></li>
+      </ul>
+    </section>
+
+    <section class="card" id="evidence-card">
+      <h2>Past flooding nearby <span class="badge historical">Historical</span></h2>
+      <div id="evidence"><p class="empty">Labeled aerial images from Hurricane Harvey (2017) within 5 km.</p></div>
+    </section>
+  </aside>
+</main>
+
+<section id="manager-view" class="page" hidden>
+  <div class="card">
+    <h2>Which areas need attention first?</h2>
+    <p class="small muted" id="mgr-formula"></p>
+    <div class="table-wrap"><table id="mgr-table"></table></div>
+    <p class="small muted" id="mgr-note"></p>
+  </div>
+</section>
+
+<section id="about-view" class="page" hidden>
+  <div class="metric-grid" id="about"></div>
+</section>
+
+<dialog id="site-dialog">
+  <div class="dlg-head"><strong id="dlg-title">Site</strong><button class="btn small ghost" id="dlg-close">Close</button></div>
+  <div class="dlg-body" id="dlg-body"></div>
+</dialog>
+
+<script src="/static/leaflet/leaflet.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

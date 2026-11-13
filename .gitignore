@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+evidence/
+.DS_Store
+flood_data/
