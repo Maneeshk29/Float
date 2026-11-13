@@ -64,7 +64,7 @@
     const box = $("#welcome-box");
     $("#welcome").hidden = false;
     if (step === "location") {
-      box.innerHTML = `<div class="brand"><svg viewBox="0 0 32 32" width="34" height="34" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#0a66c2"/><path d="M5 13c3-3 5-3 8 0s5 3 8 0 5-3 6-1" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><path d="M5 20c3-3 5-3 8 0s5 3 8 0 5-3 6-1" fill="none" stroke="#9cc8f2" stroke-width="2.6" stroke-linecap="round"/></svg>Float</div>
+      box.innerHTML = `<div class="brand"><img src="/static/logo-192.png" alt="" width="56" height="56" style="border-radius:14px;background:#fff">Float</div>
         <div><div class="title">Will a flood reach you?</div><p class="sub">Float checks your spot: past floods, this week's weather and local news.</p></div>
         <button class="big-btn" id="w-gps">📍 Use my location</button>
         <div class="msg err" id="w-msg"></div>
