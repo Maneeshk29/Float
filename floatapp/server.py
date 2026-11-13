@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import pandas as pd
 from PIL import Image
 
-from . import check, community, live, models
+from . import check, community, live, models, roads
 from .config import ALERT_CHECK_HOURS, DATA, EVIDENCE, HOST, MODELS, PORT, STATIC, VLM_MODEL
 
 def records(frame):
@@ -260,6 +260,16 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/check":
                 lat, lon = float(qs["lat"][0]), float(qs["lon"][0])
                 return self.send(200, check.check(lat, lon, point(lat, lon)))
+            if path == "/api/closures":
+                return self.send(200, roads.closures())
+            if path == "/api/route":
+                f = [float(qs[k][0]) for k in ("from_lat", "from_lon", "to_lat", "to_lon")]
+                if not (roads.in_houston(f[0], f[1]) and roads.in_houston(f[2], f[3])):
+                    return self.send(400, {"error": "Routes are available inside Greater Houston only."})
+                try:
+                    return self.send(200, roads.route(*f))
+                except Exception as e:
+                    return self.send(502, {"error": f"Routing service unavailable ({type(e).__name__})."})
             if path == "/api/nearby":
                 lat, lon = float(qs["lat"][0]), float(qs["lon"][0])
                 return self.send(200, nearby(lat, lon))

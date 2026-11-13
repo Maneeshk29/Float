@@ -68,15 +68,22 @@ other help*, Home shows **Get to safety**:
 Hosts and drivers accept or decline. Contacts are shared with both sides only after acceptance, and
 exact locations are never shown (only a ~1 km area).
 
-**Always available, whatever the risk:** nearest hospitals, pharmacies, grocery stores, fuel and shelters
-(list or map, with directions).
+**Always available, whatever the risk:** a Houston map with numbered pins for the nearest hospitals,
+pharmacies, grocery stores, fuel and shelters, and two buttons:
+- **Show all road closures:** live Houston TranStar road closures, high-water (flood) warnings, lane closures,
+  incidents and City of Houston street closures. Full closures and flooded roads are red ✕, partial ones orange !.
+- **Get me the best route:** up to 3 driving routes to the selected place, computed by Valhalla on OpenStreetMap
+  roads, avoiding full closures and flooded roads. Best route in bold blue, plus "Open in Google Maps" for
+  turn-by-turn directions with live traffic.
+
+The map is limited to Greater Houston, where Float's models were trained. Locations outside it fall back to Houston.
 
 ### Tabs
 
 | Tab | What's there |
 |---|---|
 | **Home** | Verdict, Get to safety (when needed), weather strip, tiles: flood history, closest places, news, your plan, guide, alerts |
-| **Nearby** | Hospitals · Pharmacies · Grocery · Fuel · Shelters, list or map |
+| **Nearby** | Map + list of hospitals · pharmacies · grocery · fuel · shelters; road closures; best route |
 | **Help** | Stay / Ride / Matches: find or offer a place or a ride, accept requests |
 | **Alerts** | One switch: warnings up to 7 days ahead for your place; inbox |
 | **Guides** | Before / During / After checklists; damage photos for claims |
@@ -183,6 +190,7 @@ floatapp/live.py       NWS, USGS, Open-Meteo, FEMA, geocoding (with provenance o
 floatapp/models.py     risk timeline, 7-day outlook, image classifier, Qwen on the GB10
 floatapp/community.py  week-ahead alerts, profiles, shelter and ride matching (stored in state/)
 floatapp/check.py      place, weather, flood history, news and the impact verdict
+floatapp/roads.py      Houston TranStar closures and closure-avoiding routes (Valhalla)
 static/               front end (index.html, app.js, style.css, Leaflet, thumbnails)
 training/             scripts that build the data files and train the models
 models/               trained models and their validation metrics
@@ -204,6 +212,8 @@ models/               trained models and their validation metrics
   phone push yet.
 - **Hosts and drivers are not vetted.** Official shelters and 2-1-1 are always listed first.
 - **Flood history uses ZIP and county records.** A ZIP with many claims can still have dry streets.
-- **Places list covers Greater Houston.** Elsewhere, Nearby says so.
+- **Houston only.** The map, places and routes cover Greater Houston.
+- **Routes avoid full closures and flooded roads, not traffic.** Use "Open in Google Maps" for live traffic.
+  A Google Maps API key is not needed; adding Google routing would need your own key and billing account.
 - **Shelter and alert records live on the Float server** in `state/`. Back up or clear that folder as needed;
   there are no accounts.

@@ -65,7 +65,7 @@
     $("#welcome").hidden = false;
     if (step === "location") {
       box.innerHTML = `<div class="brand"><img src="/static/logo-192.png" alt="" width="56" height="56" style="border-radius:14px;background:#fff">Float</div>
-        <div><div class="title">Will a flood reach you?</div><p class="sub">Float checks your spot: past floods, this week's weather and local news.</p></div>
+        <div><div class="title">Will a flood reach you?</div><p class="sub">Float checks your spot in Greater Houston: past floods, this week's weather and local news.</p></div>
         <button class="big-btn" id="w-gps">📍 Use my location</button>
         <div class="msg err" id="w-msg"></div>
         <div class="or">or</div>
@@ -116,13 +116,19 @@
   $("#place-chip").addEventListener("click", () => showWelcome("location"));
 
   // ---------- map (lives in the Nearby tab) ----------
-  const map = L.map("leaflet-map", { preferCanvas: true }).setView([29.78, -95.45], 10);
+  // Float's models were trained on Houston-area data, so the map stays on Greater Houston.
+  const HOUSTON = { lat: 29.7604, lon: -95.3698, label: "Houston" };
+  const inHouston = (lat, lon) => lat >= 29.2 && lat <= 30.5 && lon >= -96.2 && lon <= -94.6;
+  const map = L.map("leaflet-map", { preferCanvas: true, minZoom: 8,
+    maxBounds: L.latLngBounds([28.9, -96.7], [30.8, -94.1]), maxBoundsViscosity: 0.8 }).setView([29.78, -95.45], 10);
   const base = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
   const fema = L.tileLayer.wms("https://hazards.fema.gov/arcgis/services/public/NFHLWMS/MapServer/WMSServer",
     { layers: "28", format: "image/png", transparent: true, opacity: 0.5, attribution: "FEMA NFHL" });
-  const layers = { places: L.layerGroup().addTo(map), hosts: L.layerGroup().addTo(map), gauges: L.layerGroup().addTo(map), evidence: L.layerGroup(), manager: L.layerGroup().addTo(map) };
-  L.control.layers({ "Street map": base }, { "Nearby places": layers.places, "Hosts and drivers": layers.hosts, "River gauges": layers.gauges,
+  const layers = { places: L.layerGroup().addTo(map), hosts: L.layerGroup().addTo(map), gauges: L.layerGroup(), evidence: L.layerGroup(), manager: L.layerGroup().addTo(map),
+    closures: L.layerGroup().addTo(map), routes: L.layerGroup().addTo(map) };
+  L.control.layers({ "Street map": base }, { "Nearby places": layers.places, "Road closures": layers.closures, "Routes": layers.routes,
+    "Hosts and drivers": layers.hosts, "River gauges": layers.gauges,
     "Past floods (photos)": layers.evidence, "FEMA flood zones": fema }, { collapsed: true }).addTo(map);
   let pin = null;
   map.on("click", (e) => { setPlace(e.latlng.lat, e.latlng.lng, null); toast("Location set"); });
@@ -157,7 +163,9 @@
 
   // ---------- place + data ----------
   function setPlace(lat, lon, label) {
+    if (!inHouston(lat, lon)) { toast("Float covers Greater Houston. Showing Houston."); ({ lat, lon, label } = HOUSTON); }
     state.place = { lat, lon, label };
+    state.route = null; state.nearbySel = 0; state.fitMap = true;
     store.set("place", state.place);
     state.data = null; state.check = null; state.nearby = null;
     if (pin) pin.remove();
@@ -207,6 +215,7 @@
     $$("nav.tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab || (["manager", "about"].includes(tab) && b.dataset.tab === "me"))));
     TABS.forEach((t) => { $("#tab-" + t).hidden = t !== tab; });
     renderTab(tab);
+    if (tab === "nearby") { state.fitMap = true; fitMap(); }
     if (tab === "alerts") markSeen();
     if (tab === "guides") loadEvidence().then(() => { if (state.tab === "guides") renderGuides(); });
     window.scrollTo(0, 0);
@@ -234,7 +243,7 @@
     if (imp?.suggest_shelter || ["need_shelter", "need_ride", "need_help"].includes(state.profile?.role)) html += `<div id="safety"></div>`;
     if (c?.weather?.ok) {
       const lv = Object.fromEntries((look?.days || []).map((d) => [d.date, d.level]));
-      html += `<div class="card"><h2>This week ${badge("forecast")}</h2><div class="strip">${c.weather.days.map((d, i) => `
+      html += `<div class="glass-wx${c.weather.week_rain_mm > 25 ? " rainy" : ""}"><h2>This week ${badge("forecast")}</h2><div class="strip">${c.weather.days.map((d, i) => `
         <div class="wx ${lvClass(lv[d.date] || "LOW")}"><div class="d">${i === 0 ? "Today" : esc(d.weekday)}</div><div class="i">${d.icon}</div>
         <div class="t">${d.high_f}°</div><div class="r">${d.rain_chance ?? 0}% · ${d.rain_mm} mm</div><div class="dot" title="Flood risk ${esc(lv[d.date] || "LOW")}"></div></div>`).join("")}</div>
         <div class="prov">Bar = flood risk that day (green low → red high).
@@ -375,32 +384,113 @@
     }));
   }
 
-  // ---------- NEARBY (always available) ----------
+  // ---------- NEARBY (always available): map, closures, best route ----------
+  const CAT_COLOR = { hospital: "#00838f", pharmacy: "#7b1fa2", grocery: "#558b2f", fuel: "#6b4fbb", shelter: "#0b6e4f" };
+  const gmaps = (x) => `https://www.google.com/maps/dir/?api=1${state.place ? `&origin=${state.place.lat},${state.place.lon}` : ""}&destination=${x.lat},${x.lon}&travelmode=driving`;
+  const nearbyItems = () => state.nearby?.places?.[state.nearbyCat] || [];
   function drawNearbyLayer() {
     layers.places.clearLayers();
-    const C = { hospital: "#00838f", pharmacy: "#7b1fa2", grocery: "#558b2f", fuel: "#6b4fbb", shelter: "#0b6e4f" };
-    Object.entries(state.nearby?.places || {}).forEach(([t, list]) => list.forEach((x) =>
-      L.circleMarker([x.lat, x.lon], { radius: 7, color: "#fff", weight: 2, fillColor: C[t], fillOpacity: 0.95 })
-        .bindPopup(`${PLACE_ICON[t]} <strong>${esc(x.name)}</strong><br>${esc(x.address || "")}<br><a href="${dirLink(x.lat, x.lon)}" target="_blank" rel="noopener">Directions</a>`).addTo(layers.places)));
+    nearbyItems().forEach((x, i) => L.marker([x.lat, x.lon], { zIndexOffset: i === state.nearbySel ? 1000 : 0,
+      icon: L.divIcon({ className: "", html: `<div class="num-pin${i === state.nearbySel ? " sel" : ""}" style="background:${CAT_COLOR[state.nearbyCat]}"><span>${i + 1}</span></div>`,
+        iconSize: i === state.nearbySel ? [36, 36] : [28, 28], iconAnchor: i === state.nearbySel ? [18, 36] : [14, 28] }) })
+      .bindTooltip(`${i + 1}. ${x.name}`).on("click", () => selectPlace(i)).addTo(layers.places));
+  }
+  function drawClosures() {
+    layers.closures.clearLayers();
+    const list = state.showClosures && state.closures?.items ? state.closures.items
+      : (state.route?.avoided || []).map((c) => ({ ...c, kind: "closed" }));
+    list.forEach((c) => L.marker([c.lat, c.lon], { zIndexOffset: c.kind === "closed" ? 500 : 0,
+      icon: L.divIcon({ className: "", html: `<div class="closure-x ${c.kind}">${c.kind === "closed" ? "✕" : "!"}</div>`, iconSize: c.kind === "closed" ? [22, 22] : [18, 18] }) })
+      .bindPopup(`<strong>${c.kind === "closed" ? "🚫 Closed" : "⚠️ Partly closed"}</strong><br>${esc(c.title)}<br><span class="muted">${esc(c.detail)}<br>${esc(c.source)}</span>`)
+      .addTo(layers.closures));
+  }
+  const ROUTE_COLORS = ["#0a66c2", "#7e57c2", "#00897b"];
+  function drawRoutes() {
+    layers.routes.clearLayers();
+    const routes = state.route?.routes;
+    if (!routes) return;
+    routes.slice(1).forEach((r, i) => L.polyline(r.path, { color: ROUTE_COLORS[i + 1], weight: 5, opacity: 0.75, dashArray: "8 8" }).addTo(layers.routes));
+    L.polyline(routes[0].path, { color: "#fff", weight: 11, opacity: 0.9 }).addTo(layers.routes);
+    L.polyline(routes[0].path, { color: ROUTE_COLORS[0], weight: 7 }).addTo(layers.routes);
+  }
+  function fitMap() {
+    if (!state.fitMap) return;
+    state.fitMap = false;
+    setTimeout(() => {
+      map.invalidateSize();
+      const pts = state.route?.routes ? state.route.routes.flatMap((r) => r.path)
+        : [state.place && [state.place.lat, state.place.lon], ...nearbyItems().slice(0, 5).map((x) => [x.lat, x.lon])].filter(Boolean);
+      if (pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.15));
+      else if (state.place) map.setView([state.place.lat, state.place.lon], 12);
+    }, 40);
+  }
+  function selectPlace(i) { state.nearbySel = i; state.route = null; state.fitMap = false; renderNearby(); }
+  async function toggleClosures() {
+    state.showClosures = !state.showClosures;
+    if (state.showClosures) {
+      renderNearby();
+      try { state.closures = await api("/api/closures"); } catch (e) { toast("Road closure data unavailable"); state.showClosures = false; }
+      if (state.showClosures) { map.setView([29.76, -95.45], 10); }
+    }
+    renderNearby();
+  }
+  async function bestRoute() {
+    const dest = nearbyItems()[state.nearbySel];
+    if (!dest || !state.place) return;
+    state.route = { loading: true, dest };
+    renderNearby();
+    try {
+      const r = await api(`/api/route?from_lat=${state.place.lat}&from_lon=${state.place.lon}&to_lat=${dest.lat}&to_lon=${dest.lon}`);
+      state.route = { ...r, dest }; state.fitMap = true;
+    } catch (e) { state.route = { error: e.message, dest }; }
+    renderNearby();
+  }
+  function routeCard() {
+    const r = state.route;
+    if (!r) return "";
+    if (r.loading) return `<div class="card route-card"><p class="empty">Finding the best route to ${esc(r.dest.name)}...</p></div>`;
+    if (r.error) return `<div class="card route-card"><p class="msg err">${esc(r.error)}</p><a class="btn ghost" href="${gmaps(r.dest)}" target="_blank" rel="noopener">Open in Google Maps</a></div>`;
+    const best = r.routes[0];
+    return `<div class="card route-card"><div class="k muted small" style="font-weight:800;text-transform:uppercase;letter-spacing:.06em">Best route to</div>
+      <h2 style="margin:2px 0 8px">${esc(r.dest.name)}</h2>
+      ${r.routes.map((x, i) => `<div class="opt"><span class="swatch" style="background:${ROUTE_COLORS[i]}${i ? ";opacity:.7" : ""}"></span>
+        <div style="flex:1"><span class="${i ? "" : "big"}" style="font-weight:900">${x.minutes} min</span> <span class="muted">· ${x.km} km${i ? "" : " · fastest"}</span></div></div>`).join("")}
+      <p class="small muted" style="margin:8px 0 12px">${r.avoided.length ? `🚫 Avoids ${r.avoided.length} closed road${r.avoided.length > 1 ? "s" : ""} (red ✕).` : "No full closures on the way."} Live traffic not included.</p>
+      <div class="map-tools"><a class="btn" href="${gmaps(r.dest)}" target="_blank" rel="noopener">Open in Google Maps</a><button class="btn ghost" id="n-clear">Clear route</button></div></div>`;
+  }
+  function closuresCard() {
+    if (!state.showClosures) return "";
+    const c = state.closures;
+    if (!c) return `<div class="card"><p class="empty">Loading road closures...</p></div>`;
+    const closed = c.items.filter((x) => x.kind === "closed");
+    return `<div class="card"><h2>🚧 Road closures ${badge("verified")}</h2>
+      <div class="row2" style="margin-bottom:6px"><div><div class="big" style="font-size:2rem;font-weight:900;color:var(--official)">${c.counts.closed}</div><div class="muted">roads fully closed or flooded</div></div>
+        <div><div class="big" style="font-size:2rem;font-weight:900;color:var(--moderate)">${c.counts.partial}</div><div class="muted">lane closures and incidents</div></div></div>
+      ${closed.length ? `<div class="rows">${closed.map((x) => `<button class="r" data-fly="${x.lat},${x.lon}"><span class="ic">🚫</span><div class="m"><div class="n">${esc(x.title)}</div><div class="s clamp">${esc(x.detail)}</div></div></button>`).join("")}</div>` : ""}
+      <p class="prov">Houston TranStar + City of Houston · updated every 5 min</p></div>`;
   }
   function renderNearby() {
     const top = $("#nearby-top"), list = $("#nearby-list"), shell = $("#map-shell");
-    const n = state.nearby;
+    const n = state.nearby, items = nearbyItems();
+    if (!(state.nearbySel < items.length)) state.nearbySel = 0;
+    const dest = items[state.nearbySel];
     top.innerHTML = `<div><div class="title">Nearby</div><p class="sub">Closest to ${esc(placeName())}</p></div>
-      <div class="chips" style="margin-top:12px">${Object.keys(PLACE_ICON).map((t) => `<button data-cat="${t}" aria-pressed="${state.nearbyCat === t}">${PLACE_ICON[t]} ${PLACE_NAME[t]}</button>`).join("")}
-        <button data-view="${state.nearbyView === "map" ? "list" : "map"}" style="margin-left:auto">${state.nearbyView === "map" ? "☰ List" : "🗺️ Map"}</button></div>`;
-    $$("[data-cat]", top).forEach((b) => b.addEventListener("click", () => { state.nearbyCat = b.dataset.cat; state.nearbyView = "list"; renderNearby(); }));
-    $$("[data-view]", top).forEach((b) => b.addEventListener("click", () => { state.nearbyView = b.dataset.view; renderNearby(); }));
-    shell.hidden = state.nearbyView !== "map";
-    if (state.nearbyView === "map") {
-      list.innerHTML = `<p class="small muted">Tap the map to move your location. Layers: top right.</p>`;
-      setTimeout(() => { map.invalidateSize(); if (state.place) map.setView([state.place.lat, state.place.lon], Math.max(map.getZoom(), 12)); }, 30);
-      return;
-    }
-    const items = n?.places?.[state.nearbyCat] || [];
-    list.innerHTML = `<div class="card">${!n ? `<p class="empty">Loading...</p>` : items.length ? `<div class="rows">${items.map(placeRow).join("")}</div>`
-      : `<p class="empty">${n.in_coverage ? "None within 30 km." : "Float's place list covers Greater Houston for now."}${state.nearbyCat === "shelter" ? ` <a href="https://www.redcross.org/get-help/disaster-relief-and-recovery-services/find-an-open-shelter.html" target="_blank" rel="noopener">Red Cross shelters</a>` : ""}</p>`}
-      <p class="prov">${state.nearbyCat === "hospital" ? "Open status: call ahead." : "Open status and stock: unknown."} OpenStreetMap · tap a place for directions.</p></div>`;
+      <div class="chips" style="margin:12px 0">${Object.keys(PLACE_ICON).map((t) => `<button data-cat="${t}" aria-pressed="${state.nearbyCat === t}">${PLACE_ICON[t]} ${PLACE_NAME[t]}</button>`).join("")}</div>
+      <div class="map-tools"><button class="btn ${state.showClosures ? "on" : "ghost"}" id="n-closures">🚧 ${state.showClosures ? "Hide road closures" : "Show all road closures"}</button>
+        <button class="btn" id="n-route" ${dest && state.place ? "" : "disabled"}>🧭 Get me the best route${dest ? ` to #${state.nearbySel + 1}` : ""}</button></div>`;
+    shell.hidden = false;
+    list.innerHTML = routeCard() + closuresCard() + `<div class="card">${!n ? `<p class="empty">Loading...</p>` : items.length
+      ? `<div class="rows">${items.map((x, i) => `<button class="r${i === state.nearbySel ? " sel" : ""}" data-sel="${i}"><span class="num" style="background:${CAT_COLOR[state.nearbyCat]}">${i + 1}</span>
+          <div class="m"><div class="n">${esc(x.name)}</div><div class="s">${esc(x.address || PLACE_NAME[x.type])}</div></div><span class="km">${km(x.km)}</span></button>`).join("")}</div>`
+      : `<p class="empty">None within 30 km.${state.nearbyCat === "shelter" ? ` <a href="https://www.redcross.org/get-help/disaster-relief-and-recovery-services/find-an-open-shelter.html" target="_blank" rel="noopener">Red Cross shelters</a>` : ""}</p>`}
+      <p class="prov">${state.nearbyCat === "hospital" ? "Open status: call ahead." : "Open status and stock: unknown."} Tap a place, then "Get me the best route". OpenStreetMap.</p></div>`;
+    $$("[data-cat]", top).forEach((b) => b.addEventListener("click", () => { state.nearbyCat = b.dataset.cat; state.nearbySel = 0; state.route = null; state.fitMap = true; renderNearby(); }));
+    $("#n-closures").addEventListener("click", toggleClosures);
+    $("#n-route").addEventListener("click", bestRoute);
+    const clear = $("#n-clear"); if (clear) clear.addEventListener("click", () => { state.route = null; state.fitMap = true; renderNearby(); });
+    $$("[data-sel]", list).forEach((b) => b.addEventListener("click", () => { selectPlace(+b.dataset.sel); window.scrollTo({ top: 0, behavior: "smooth" }); }));
+    $$("[data-fly]", list).forEach((b) => b.addEventListener("click", () => { const [a, o] = b.dataset.fly.split(","); map.setView([+a, +o], 15); window.scrollTo({ top: 0, behavior: "smooth" }); }));
+    drawNearbyLayer(); drawClosures(); drawRoutes(); fitMap();
   }
 
   // ---------- HELP: shelter + rides ----------

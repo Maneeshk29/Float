@@ -86,8 +86,16 @@ try {
   check("nearby hospitals listed", await waitFor(`document.querySelectorAll('#nearby-list .r').length >= 3`), await text("#nearby-list"));
   await evalJS(`document.querySelector('[data-cat="grocery"]').click()`);
   check("nearby grocery listed", await waitFor(`document.querySelectorAll('#nearby-list .r').length >= 3`), null);
-  await evalJS(`document.querySelector('#nearby-top [data-view="map"]').click()`);
-  check("map view opens", await evalJS(`!document.querySelector('#map-shell').hidden`), null);
+  check("map always visible with numbered pins", await evalJS(`!document.querySelector('#map-shell').hidden && document.querySelectorAll('.num-pin').length >= 3`), null);
+  await evalJS(`document.querySelector('#n-closures').click()`);
+  check("road closures shown on map", await waitFor(`document.querySelectorAll('.closure-x').length > 5 && /fully closed/.test(document.querySelector('#nearby-list').innerText)`), await text("#nearby-list"));
+  await evalJS(`document.querySelector('[data-cat="hospital"]').click()`);
+  await evalJS(`document.querySelector('[data-sel="1"]').click()`);
+  check("selecting a place updates route button", await evalJS(`document.querySelector('#n-route').innerText.includes('#2')`), await text("#n-route"));
+  await evalJS(`document.querySelector('#n-route').click()`);
+  check("best route drawn with route card", await waitFor(`/min/.test(document.querySelector('.route-card')?.innerText || '') && document.querySelectorAll('#leaflet-map path.leaflet-interactive, #leaflet-map canvas').length > 0`), await text("#nearby-list"));
+  check("route card has Google Maps link", await evalJS(`!!document.querySelector('.route-card a[href*="google.com/maps/dir"]')`), null);
+  await evalJS(`document.querySelector('#n-closures').click()`);
 
   // 7. Alerts switch
   await evalJS(`document.querySelector('nav.tabs [data-tab="alerts"]').click()`);
