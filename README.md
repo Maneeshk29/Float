@@ -4,6 +4,8 @@
 
 <p align="center"><b>Flood safety for Greater Houston: know what's coming, where to go, and who can help.</b></p>
 
+<p align="center"><b>Built By Ranya Bhartiya and Maneeshkumar Lillyprabhu.</b></p>
+
 <p align="center">
 <a href="https://float-inky-alpha.vercel.app">Live app</a> ·
 Built on the <b>Dell Pro Max with NVIDIA GB10</b> ·
