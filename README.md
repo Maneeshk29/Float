@@ -407,7 +407,8 @@ cd Float
 bash run.sh          # first run installs packages into .venv (a few minutes)
 ```
 
-Open **http://localhost:8080**. Needs Python 3.11+ and an internet connection for the live feeds.
+**Live app: [float-inky-alpha.vercel.app](https://float-inky-alpha.vercel.app)**, no install needed. To run your own copy, the commands above
+start it on your machine (Python 3.11+ and an internet connection for the live feeds).
 `requirements.txt` is what Float needs; `requirements-ml.txt` adds the photo AI and training (PyTorch).
 
 To turn on Qwen on the GB10 (photo descriptions):
@@ -435,12 +436,11 @@ machine that can reach the GB10.
 ### Tests
 
 ```sh
-python tests/community_test.py http://localhost:8080     # alerts + shelter/ride API
-node tests/ui_flow_test.mjs http://localhost:8080        # full browser flow (needs Chrome, Node 22+)
+python tests/community_test.py https://float-inky-alpha.vercel.app     # alerts + shelter/ride API
+node tests/ui_flow_test.mjs https://float-inky-alpha.vercel.app        # full browser flow (needs Chrome, Node 22+)
 node tests/live_smoke.mjs https://float-inky-alpha.vercel.app
 ```
 
-Run them against a server started with `FLOAT_STATE_DIR=/tmp/float_test_state` so test data stays separate.
 
 ### Data
 
